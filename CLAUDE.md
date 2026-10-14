@@ -47,15 +47,36 @@ The routine runs in Anthropic's cloud, so the app must be public:
 - Tests run on in-memory SQLite (`phpunit.xml`), never on the shared DB.
 - Money columns are `decimal(14,2)`, never float.
 
-## Roles and access (target design, Phase 1+)
+## Roles and access (implemented in Phase 1)
 | Role | Sees | Can do |
 | --- | --- | --- |
 | Admin | everything | all, including users and roles |
 | Account Specialist (AS) | **own** transactions and files only | upload, review, confirm, mark own files public/private |
 | User | **public files only** (any AS) | read-only; no transactions or extracted data |
 - Accounts are created by an admin only: **no signup**. Admin sets a temporary password; user must change it at first login (`must_change_password`). Deactivate via `is_active`, do not delete. No self-service reset for now (admin resets). Email invite is a possible later change.
-- Package: `spatie/laravel-permission` (not yet installed).
-- Visibility is per file (`is_public`, default private). Enforce scope at the query/policy level, not only in the UI.
+- Package: `spatie/laravel-permission`. Roles and permission names live in `config/ra.php`; `AccessSeeder` is idempotent (re-run `php artisan db:seed` after editing it). Non-Admin roles are only synced when the role is first created, so changes made in the Roles screen are not overwritten by a re-seed. Admin always holds every permission and cannot be edited.
+- Permissions: `users.manage`, `roles.manage`, `remittances.upload`, `remittances.view-own`, `remittances.view-all`, `remittances.confirm`, `files.set-visibility`, `files.view-public`.
+- First admin: set `ADMIN_NAME`, `ADMIN_EMAIL`, `ADMIN_PASSWORD` in `.env`, then `php artisan db:seed`. Created with `must_change_password = true`.
+- Guards: login is throttled (6/min), a disabled account fails like a wrong password, sessions are deleted (database driver) on deactivate and password reset, the last active admin cannot be removed/disabled, you cannot demote yourself.
+- Record scope today: `ExtractionStore::getForUser()` returns 404 unless the entry's `user_id` is the caller or the caller has `remittances.view-all`. Every extraction route uses it.
+- Visibility is per file (`is_public`, default private) once the files table exists (Phase 2). Enforce scope at the query/policy level, not only in the UI.
+
+## Endpoints (keep this list accurate; anything not here must require login)
+| Public | Why |
+| --- | --- |
+| `GET/POST /login` | sign in (POST throttled) |
+| `POST /claude-extractions/{uuid}/result` | routine callback: one-time bearer token, status gate, validated payload, throttled, CSRF-exempt |
+| `GET /claude-extractions/{uuid}/image/{index}` | `signed` middleware, 30-min expiring URL |
+| `GET /up` | framework health check, returns no data |
+Everything else is behind `auth` + `account.ok` (active account, password not pending) + a `permission:` middleware. Admin screens: `/admin/users*` (`users.manage`), `/admin/roles*` (`roles.manage`).
+
+## Frontend standards
+- jQuery + AJAX only. CSRF header is set globally in `resources/js/app.js`; 401/419 redirect to login, 423 to the password page.
+- Page shell renders first, data arrives async as JSON (`/admin/users/data` is paginated, search is prefix-based so indexes are used). Lists load more on scroll (IntersectionObserver) or button.
+- Page scripts are lazy chunks: `resources/js/pages/<name>.js`, selected by `@section('page', '<name>')`. Add a page = add a file + the section; no registration.
+- Images use `loading="lazy" decoding="async"`.
+- Look: flat colour tokens in `resources/css/app.css` (no gradients, 1px borders, system font, one accent). Reuse the component classes (`.panel`, `.table`, `.btn`, `.badge`, `.modal`, `.field`) before adding new ones. Run `npm run build` after changing CSS/JS or Blade classes.
+- Modals use native `<dialog>`; toasts via `window.toast(message, isError)`.
 
 ## Target schema (Phase 2, all `ra_` prefixed, normalized)
 `users 1─< remittances 1─< remittance_files`, `remittances 1─< remittance_invoices >─1 sales_invoices`, `remittances 1─< extraction_runs`.
@@ -70,8 +91,8 @@ The routine runs in Anthropic's cloud, so the app must be public:
 | --- | --- | --- |
 | spike | Claude routine engine (separate module) | done, working end to end |
 | 0 | Foundation: DB prefix, test isolation, migrations on shared DB | done |
-| 1 | Auth (login only), roles, permissions, admin screens for users/roles | **next** |
-| 2 | Normalized transaction schema | pending |
+| 1 | Auth (login only), roles, permissions, admin screens for users/roles | done |
+| 2 | Normalized transaction schema | **next** |
 | 3 | Move both engines from cache to the DB, ownership, policies | pending |
 | 4 | Admin UI: transactions list/detail, public files screen | pending |
 | 5 | Hardening: audit trail, export, sweeper, deploy to a real domain | pending |
@@ -85,6 +106,8 @@ Fields: payment_reference_number, cr_number, total_amount, total_cwt_amount, dep
 - deposit_date has no reliable label (usually just "Date"): priority check/deposit slip, then payment-details doc, then collection receipt; ignore invoice/due/2307 dates; assume MM/DD/YYYY; flag low confidence if ambiguous. The routine prompt (in claude.ai, not in this repo) must carry this rule.
 
 ## Conventions
+- Tests that touch the DB use `RefreshDatabase` (SQLite in memory) and `$this->seed(AccessSeeder::class)`. `UserFactory` sets `is_active`/`must_change_password`.
+- Spatie roles/permissions need no manual cache handling; the seeder clears the registry cache.
 - Match surrounding code style; short comments only for non-obvious "why".
 - Tests: `php artisan test`. Claude flow tests: `tests/Feature/ClaudeExtractionTest.php` (HTTP and queue faked).
 - `.env.example` documents every new env key.
@@ -101,3 +124,4 @@ Fields: payment_reference_number, cr_number, total_amount, total_cwt_amount, dep
 - 2026-10-14: completion timing log added to the callback.
 - 2026-10-14: `DB_PREFIX=ra_`, SQLite test isolation, base Laravel tables migrated on the shared DB.
 - 2026-10-14: CLAUDE.md created.
+- 2026-10-14: Phase 1 done. Added spatie/laravel-permission, `users.is_active`/`must_change_password` (+ name/is_active indexes), `config/ra.php`, `AccessSeeder`, login/logout/change-password, `EnsureAccountIsUsable` (`account.ok`), admin Users and Roles screens (AJAX, lazy chunks), per-record ownership on all extraction routes, new flat UI shell, tests in `tests/Feature/AccessTest.php`. Extraction routes now require login; callback and signed image route remain public. Migrations (`ra_` tables only) and seeding were run on the shared DB.

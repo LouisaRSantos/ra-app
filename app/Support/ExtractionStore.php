@@ -33,6 +33,21 @@ class ExtractionStore
         return Cache::get(self::key($uuid));
     }
 
+    /**
+     * The entry only if the signed-in user may see it (owner, or holds remittances.view-all).
+     * Anything else is a 404, so ids cannot be probed.
+     */
+    public static function getForUser(string $uuid): array
+    {
+        $entry = self::get($uuid);
+        $user = auth()->user();
+
+        abort_if($entry === null || $user === null
+            || ($entry['user_id'] !== $user->id && ! $user->can('remittances.view-all')), 404);
+
+        return $entry;
+    }
+
     public static function update(string $uuid, array $data): void
     {
         $entry = self::get($uuid);

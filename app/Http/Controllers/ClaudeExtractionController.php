@@ -26,7 +26,7 @@ class ClaudeExtractionController extends Controller
     public function store(StoreExtractionRequest $request): JsonResponse
     {
         $uuid = (string) Str::uuid();
-        $entry = ['disk_paths' => [], 'mime_types' => [], 'original_filenames' => []];
+        $entry = ['user_id' => $request->user()->id, 'disk_paths' => [], 'mime_types' => [], 'original_filenames' => []];
 
         foreach ($request->file('images') as $index => $file) {
             $entry['disk_paths'][] = $file->storeAs('extractions', "{$uuid}-{$index}.".$file->getClientOriginalExtension(), 'local');

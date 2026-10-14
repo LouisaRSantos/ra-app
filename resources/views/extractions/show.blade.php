@@ -20,7 +20,7 @@
                 @foreach ($entry['disk_paths'] as $i => $diskPath)
                     <img src="{{ route('extractions.image', ['uuid' => $uuid, 'index' => $i]) }}"
                          alt="{{ $entry['original_filenames'][$i] ?? 'Remittance advice page '.($i + 1) }}"
-                         class="w-full border rounded">
+                         loading="lazy" decoding="async" class="w-full border rounded">
                 @endforeach
             </div>
             <div>

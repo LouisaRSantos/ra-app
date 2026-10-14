@@ -5,6 +5,9 @@ namespace Tests\Feature;
 use App\Jobs\DispatchClaudeExtraction;
 use App\Jobs\ExpireClaudeExtraction;
 use App\Support\ExtractionStore;
+use App\Models\User;
+use Database\Seeders\AccessSeeder;
+use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
@@ -13,6 +16,8 @@ use Tests\TestCase;
 
 class ClaudeExtractionTest extends TestCase
 {
+    use RefreshDatabase;
+
     private const PAYLOAD = [
         'payment_reference_number' => 'CHK-5678',
         'cr_number' => 'CR-1234',
@@ -40,12 +45,15 @@ class ClaudeExtractionTest extends TestCase
     {
         Queue::fake();
         Storage::fake('local');
+        $this->seed(AccessSeeder::class);
+        $user = tap(User::factory()->create())->assignRole('Account Specialist');
 
-        $uuid = $this->post(route('claude.store'), ['images' => [UploadedFile::fake()->image('a.jpg')]], ['Accept' => 'application/json'])
+        $uuid = $this->actingAs($user)->post(route('claude.store'), ['images' => [UploadedFile::fake()->image('a.jpg')]], ['Accept' => 'application/json'])
             ->assertOk()->json('uuid');
 
         Queue::assertPushed(DispatchClaudeExtraction::class);
         $this->assertSame('pending', ExtractionStore::get($uuid)['status']);
+        $this->assertSame($user->id, ExtractionStore::get($uuid)['user_id']);
     }
 
     public function test_job_fires_routine_and_sets_processing(): void

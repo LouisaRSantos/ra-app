@@ -35,6 +35,7 @@ class ExtractionController extends Controller
         }
 
         ExtractionStore::create($uuid, [
+            'user_id' => $request->user()->id,
             'disk_paths' => $diskPaths,
             'mime_types' => $mimeTypes,
             'original_filenames' => $originalFilenames,
@@ -47,9 +48,7 @@ class ExtractionController extends Controller
 
     public function status(string $uuid): JsonResponse
     {
-        $entry = ExtractionStore::get($uuid);
-
-        abort_if($entry === null, 404);
+        $entry = ExtractionStore::getForUser($uuid);
 
         return response()->json([
             'status' => $entry['status'],
@@ -59,18 +58,14 @@ class ExtractionController extends Controller
 
     public function show(string $uuid)
     {
-        $entry = ExtractionStore::get($uuid);
-
-        abort_if($entry === null, 404);
+        $entry = ExtractionStore::getForUser($uuid);
 
         return view('extractions.show', ['uuid' => $uuid, 'entry' => $entry]);
     }
 
     public function update(UpdateExtractionRequest $request, string $uuid): JsonResponse
     {
-        $entry = ExtractionStore::get($uuid);
-
-        abort_if($entry === null, 404);
+        ExtractionStore::getForUser($uuid);
 
         ExtractionStore::update($uuid, [
             'payment_reference_number' => $request->input('payment_reference_number'),
@@ -88,9 +83,8 @@ class ExtractionController extends Controller
 
     public function image(string $uuid, int $index): StreamedResponse
     {
-        $entry = ExtractionStore::get($uuid);
+        $entry = ExtractionStore::getForUser($uuid);
 
-        abort_if($entry === null, 404);
         abort_unless(array_key_exists($index, $entry['disk_paths']), 404);
         abort_unless(Storage::disk('local')->exists($entry['disk_paths'][$index]), 404);
 
