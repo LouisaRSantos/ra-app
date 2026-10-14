@@ -31,7 +31,7 @@ window.pollStatus = (uuid, onData) => {
             return;
         }
 
-        $.getJSON(`/extractions/${uuid}/status`)
+        $.getJSON(`/transactions/${uuid}/status`)
             .done((data) => {
                 onData(data);
                 if (data.status === 'completed' || data.status === 'failed') return;

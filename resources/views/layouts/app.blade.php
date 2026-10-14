@@ -16,10 +16,9 @@
             <button type="button" class="menu-btn" id="menu-btn" aria-label="Menu">Menu</button>
         </div>
         <nav class="side-nav">
-            @canany(['remittances.upload'])
-                <div class="side-label">Extraction</div>
-                <a class="side-link {{ request()->routeIs('claude.*', 'extractions.*') ? 'is-active' : '' }}" href="{{ route('claude.index') }}">Upload (Claude)</a>
-                <a class="side-link {{ request()->is('extractions') ? 'is-active' : '' }}" href="{{ route('extractions.index') }}">Upload (Groq)</a>
+            @canany(['remittances.view-own', 'remittances.view-all'])
+                <div class="side-label">Collections</div>
+                <a class="side-link {{ request()->routeIs('transactions.*') ? 'is-active' : '' }}" href="{{ route('transactions.index') }}">Transactions</a>
             @endcanany
             @can('files.view-public')
                 <div class="side-label">Files</div>

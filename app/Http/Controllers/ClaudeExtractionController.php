@@ -4,8 +4,6 @@ namespace App\Http\Controllers;
 
 use App\Enums\ExtractionEngine;
 use App\Enums\ExtractionStatus;
-use App\Http\Requests\StoreExtractionRequest;
-use App\Jobs\DispatchClaudeExtraction;
 use App\Models\Remittance;
 use App\Support\RemittanceWriter;
 use Illuminate\Http\JsonResponse;
@@ -16,25 +14,14 @@ use Illuminate\Support\Facades\Validator;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
 /**
- * Claude-routine engine, alongside the Groq one. Status/review/confirm reuse ExtractionController's routes.
+ * The two PUBLIC endpoints the Claude routine talks to (uploading and everything else
+ * lives in TransactionController, behind login):
+ *  - callback: one-time bearer token, status gate, validated payload
+ *  - image:    expiring signed URL
  */
 class ClaudeExtractionController extends Controller
 {
-    public function index()
-    {
-        return view('extractions.index', ['storeUrl' => route('claude.store')]);
-    }
-
-    public function store(StoreExtractionRequest $request): JsonResponse
-    {
-        $run = RemittanceWriter::createFromUpload($request->user(), $request->file('images'), ExtractionEngine::Claude);
-
-        DispatchClaudeExtraction::dispatch($run->id);
-
-        return response()->json(['uuid' => $run->remittance->uuid, 'status' => 'pending']);
-    }
-
-    /** Public endpoint: the body comes from a model reading user-uploaded images, so treat it as untrusted. */
+    /** The body comes from a model reading user-uploaded images, so treat it as untrusted. */
     public function callback(Request $request, string $uuid): JsonResponse
     {
         $remittance = Remittance::where('uuid', $uuid)->firstOrFail();
@@ -98,6 +85,6 @@ class ClaudeExtractionController extends Controller
 
         abort_unless(Storage::disk('local')->exists($file->path), 404);
 
-        return Storage::disk('local')->response($file->path);
+        return Storage::disk('local')->response($file->path, null, ['X-Content-Type-Options' => 'nosniff']);
     }
 }

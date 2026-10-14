@@ -26,13 +26,13 @@ class AccessTest extends TestCase
 
     public function test_guests_are_sent_to_login_everywhere(): void
     {
-        foreach (['/', '/files', '/extractions', '/claude-extractions', '/admin/users', '/admin/roles', '/admin/users/data', '/password'] as $path) {
+        foreach (['/', '/files', '/transactions', '/transactions/data', '/admin/users', '/admin/roles', '/admin/users/data', '/password'] as $path) {
             $this->get($path)->assertRedirect('/login');
         }
 
         $this->postJson('/admin/users', [])->assertUnauthorized();
-        $this->putJson('/extractions/x', [])->assertUnauthorized();
-        $this->getJson('/extractions/x/status')->assertUnauthorized();
+        $this->putJson('/transactions/00000000-0000-0000-0000-000000000000', [])->assertUnauthorized();
+        $this->getJson('/transactions/00000000-0000-0000-0000-000000000000/status')->assertUnauthorized();
     }
 
     public function test_there_is_no_signup(): void
@@ -61,19 +61,19 @@ class AccessTest extends TestCase
     public function test_deactivated_session_is_signed_out(): void
     {
         $user = $this->userWithRole('Account Specialist');
-        $this->actingAs($user)->get('/claude-extractions')->assertOk();
+        $this->actingAs($user)->get('/transactions')->assertOk();
 
         $user->forceFill(['is_active' => false])->save();
 
-        $this->actingAs($user->fresh())->get('/claude-extractions')->assertRedirect('/login');
+        $this->actingAs($user->fresh())->get('/transactions')->assertRedirect('/login');
     }
 
     public function test_temporary_password_forces_change_before_anything_else(): void
     {
         $user = $this->userWithRole('Account Specialist', ['password' => 'Temp-pass-1', 'must_change_password' => true]);
 
-        $this->actingAs($user)->get('/claude-extractions')->assertRedirect('/password');
-        $this->actingAs($user)->getJson('/extractions/x/status')->assertStatus(423);
+        $this->actingAs($user)->get('/transactions')->assertRedirect('/password');
+        $this->actingAs($user)->getJson('/transactions/00000000-0000-0000-0000-000000000000/status')->assertStatus(423);
 
         $this->actingAs($user)->put('/password', [
             'current_password' => 'Temp-pass-1',
@@ -82,13 +82,13 @@ class AccessTest extends TestCase
         ])->assertRedirect('/');
 
         $this->assertFalse($user->fresh()->must_change_password);
-        $this->actingAs($user->fresh())->get('/claude-extractions')->assertOk();
+        $this->actingAs($user->fresh())->get('/transactions')->assertOk();
     }
 
     public function test_home_redirects_by_role(): void
     {
-        $this->actingAs($this->userWithRole('Admin'))->get('/')->assertRedirect(route('admin.users.index'));
-        $this->actingAs($this->userWithRole('Account Specialist'))->get('/')->assertRedirect(route('claude.index'));
+        $this->actingAs($this->userWithRole('Admin'))->get('/')->assertRedirect(route('transactions.index'));
+        $this->actingAs($this->userWithRole('Account Specialist'))->get('/')->assertRedirect(route('transactions.index'));
         $this->actingAs($this->userWithRole('User'))->get('/')->assertRedirect(route('files.index'));
     }
 
@@ -102,9 +102,9 @@ class AccessTest extends TestCase
         // an AS sees only their own records, not the shared public-files list
         $this->actingAs($as)->get('/files')->assertForbidden();
 
-        $this->actingAs($plain)->get('/claude-extractions')->assertForbidden();
-        $this->actingAs($plain)->post('/claude-extractions')->assertForbidden();
-        $this->actingAs($plain)->get('/extractions/x/status')->assertForbidden();
+        $this->actingAs($plain)->get('/transactions')->assertForbidden();
+        $this->actingAs($plain)->post('/transactions')->assertForbidden();
+        $this->actingAs($plain)->get('/transactions/00000000-0000-0000-0000-000000000000/status')->assertForbidden();
         $this->actingAs($plain)->get('/files')->assertOk();
     }
 
@@ -116,15 +116,15 @@ class AccessTest extends TestCase
         $remittance = Remittance::factory()->completed()->for($owner)->create();
         $uuid = $remittance->uuid;
 
-        $this->actingAs($owner)->getJson("/extractions/{$uuid}/status")->assertOk();
-        $this->actingAs($other)->getJson("/extractions/{$uuid}/status")->assertNotFound();
-        $this->actingAs($other)->get("/extractions/{$uuid}")->assertNotFound();
-        $this->actingAs($other)->get("/extractions/{$uuid}/image/0")->assertNotFound();
-        $this->actingAs($other)->putJson("/extractions/{$uuid}", [
+        $this->actingAs($owner)->getJson("/transactions/{$uuid}/status")->assertOk();
+        $this->actingAs($other)->getJson("/transactions/{$uuid}/status")->assertNotFound();
+        $this->actingAs($other)->getJson("/transactions/{$uuid}")->assertNotFound();
+        $this->actingAs($other)->get("/files/{$uuid}/0")->assertNotFound();
+        $this->actingAs($other)->putJson("/transactions/{$uuid}", [
             'total_amount' => 1, 'deposit_date' => '2026-10-01', 'invoices' => [['si_number' => 'SI1', 'amount' => 1, 'cwt_amount' => 0]],
         ])->assertNotFound();
         $this->assertFalse($remittance->fresh()->isConfirmed());
-        $this->actingAs($admin)->getJson("/extractions/{$uuid}/status")->assertOk();
+        $this->actingAs($admin)->getJson("/transactions/{$uuid}/status")->assertOk();
     }
 
     public function test_admin_manages_users(): void
@@ -181,7 +181,7 @@ class AccessTest extends TestCase
 
         // a session whose recorded password hash no longer matches (what a reset produces)
         $this->actingAs($user)->withSession(['password_hash_web' => 'hash-from-before-the-reset'])
-            ->get('/claude-extractions')->assertRedirect('/login');
+            ->get('/transactions')->assertRedirect('/login');
     }
 
     public function test_status_polling_stays_cheap(): void
@@ -189,14 +189,14 @@ class AccessTest extends TestCase
         $user = $this->userWithRole('Account Specialist');
         $remittance = Remittance::factory()->for($user)->create(['status' => 'processing']);
 
-        $this->actingAs($user)->getJson("/extractions/{$remittance->uuid}/status")->assertOk(); // warm permission cache
+        $this->actingAs($user)->getJson("/transactions/{$remittance->uuid}/status")->assertOk(); // warm permission cache
 
         $queries = 0;
         \Illuminate\Support\Facades\DB::listen(function () use (&$queries) {
             $queries++;
         });
 
-        $this->actingAs($user)->getJson("/extractions/{$remittance->uuid}/status")
+        $this->actingAs($user)->getJson("/transactions/{$remittance->uuid}/status")
             ->assertOk()->assertJson(['status' => 'processing', 'error_message' => null]);
 
         // user, roles, remittance. Each query is a network round trip against the shared DB.
@@ -209,7 +209,7 @@ class AccessTest extends TestCase
         $remittance = Remittance::factory()->for($user)->create(['status' => 'failed']);
         $remittance->runs()->create(['engine' => 'claude', 'status' => 'failed', 'error' => 'Processing took too long.']);
 
-        $this->actingAs($user)->getJson("/extractions/{$remittance->uuid}/status")
+        $this->actingAs($user)->getJson("/transactions/{$remittance->uuid}/status")
             ->assertOk()->assertJson(['status' => 'failed', 'error_message' => 'Processing took too long.']);
     }
 

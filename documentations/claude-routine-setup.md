@@ -1,6 +1,6 @@
 # Claude routine engine: setup
 
-Separate from the Groq flow. Page: `/claude-extractions`. Review/confirm screens are shared with `/extractions`.
+Used from `/transactions` (Upload documents, reader Claude). The routine itself only talks to the public callback and signed image URLs under `/claude-extractions/`.
 
 ## 1. Create the routine (claude.ai, Routines)
 
@@ -51,7 +51,7 @@ Rules:
 
 ## 4. Spike checks (Phase 0)
 
-Upload 3 to 10 real documents at `/claude-extractions` and confirm:
+Upload 3 to 10 real documents at `/transactions` (Upload documents, reader Claude) and confirm:
 
 - the run's session URL is logged (`storage/logs/laravel.log`, "Claude routine fired");
 - images are fetched, JSON shape is stable, time per document is acceptable;

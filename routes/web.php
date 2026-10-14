@@ -5,7 +5,8 @@ use App\Http\Controllers\Admin\UserController;
 use App\Http\Controllers\Auth\LoginController;
 use App\Http\Controllers\Auth\PasswordController;
 use App\Http\Controllers\ClaudeExtractionController;
-use App\Http\Controllers\ExtractionController;
+use App\Http\Controllers\FileController;
+use App\Http\Controllers\TransactionController;
 use Illuminate\Foundation\Http\Middleware\ValidateCsrfToken;
 use Illuminate\Session\Middleware\AuthenticateSession;
 use Illuminate\Support\Facades\Route;
@@ -14,8 +15,8 @@ use Illuminate\Support\Facades\Route;
 |--------------------------------------------------------------------------
 | Public by design (everything else requires login)
 |--------------------------------------------------------------------------
-| - login form / submit
-| - the Claude routine callback: bearer-token protected, one-time, CSRF-exempt, throttled
+| - login form / submit (submit is throttled)
+| - the Claude routine callback: one-time bearer token, status gate, CSRF-exempt, throttled
 | - the Claude routine image fetch: signed + expiring URL
 | - /up (framework health check, returns no data)
 */
@@ -26,18 +27,18 @@ Route::middleware('guest')->group(function () {
 
 Route::prefix('claude-extractions')->name('claude.')->group(function () {
     Route::post('/{uuid}/result', [ClaudeExtractionController::class, 'callback'])->name('callback')
-        ->withoutMiddleware(ValidateCsrfToken::class)->middleware('throttle:30,1');
+        ->whereUuid('uuid')->withoutMiddleware(ValidateCsrfToken::class)->middleware('throttle:30,1');
     Route::get('/{uuid}/image/{index}', [ClaudeExtractionController::class, 'image'])->name('image')
-        ->whereNumber('index')->middleware('signed');
+        ->whereUuid('uuid')->whereNumber('index')->middleware('signed');
 });
 
 /*
 |--------------------------------------------------------------------------
 | Authenticated
 |--------------------------------------------------------------------------
+| auth.session: a password change (e.g. an admin reset) invalidates that user's other sessions,
+| whichever session driver is in use.
 */
-// auth.session: a password change (e.g. an admin reset) invalidates that user's other sessions,
-// whichever session driver is in use.
 Route::middleware(['auth', AuthenticateSession::class])->group(function () {
     Route::post('/logout', [LoginController::class, 'destroy'])->name('logout');
 
@@ -48,34 +49,43 @@ Route::middleware(['auth', AuthenticateSession::class])->group(function () {
         Route::get('/', function () {
             $user = auth()->user();
 
-            return redirect()->route(match (true) {
-                $user->can('users.manage') => 'admin.users.index',
-                $user->can('remittances.upload') => 'claude.index',
-                default => 'files.index',
-            });
+            return redirect()->route(
+                $user->canAny(['remittances.view-own', 'remittances.view-all']) ? 'transactions.index' : 'files.index'
+            );
         })->name('home');
 
-        // Public files for the read-only User role (list is built in Phase 4).
-        Route::get('/files', fn () => view('files.index'))
-            ->middleware('permission:files.view-public')->name('files.index');
-
-        // Upload + extraction. Ownership is enforced per record inside the controllers.
-        Route::middleware('permission:remittances.upload')->group(function () {
-            Route::get('/extractions', [ExtractionController::class, 'index'])->name('extractions.index');
-            Route::post('/extractions', [ExtractionController::class, 'store'])->name('extractions.store');
-            Route::get('/claude-extractions', [ClaudeExtractionController::class, 'index'])->name('claude.index');
-            Route::post('/claude-extractions', [ClaudeExtractionController::class, 'store'])->name('claude.store');
-        });
-
+        // ---- Transactions: a user's own uploads (admins may widen to everyone) ----
         Route::middleware('permission:remittances.view-own|remittances.view-all')->group(function () {
-            Route::get('/extractions/{uuid}/status', [ExtractionController::class, 'status'])->name('extractions.status');
-            Route::get('/extractions/{uuid}/image/{index}', [ExtractionController::class, 'image'])->name('extractions.image')->whereNumber('index');
-            Route::get('/extractions/{uuid}', [ExtractionController::class, 'show'])->name('extractions.show');
+            Route::get('/transactions', [TransactionController::class, 'index'])->name('transactions.index');
+            Route::get('/transactions/data', [TransactionController::class, 'data'])
+                ->middleware('throttle:120,1')->name('transactions.data');
+            Route::get('/transactions/{uuid}', [TransactionController::class, 'show'])
+                ->whereUuid('uuid')->middleware('throttle:240,1')->name('transactions.show');
+            Route::get('/transactions/{uuid}/status', [TransactionController::class, 'status'])
+                ->whereUuid('uuid')->middleware('throttle:240,1')->name('transactions.status');
         });
 
-        Route::put('/extractions/{uuid}', [ExtractionController::class, 'update'])
-            ->middleware('permission:remittances.confirm')->name('extractions.update');
+        Route::post('/transactions', [TransactionController::class, 'store'])
+            ->middleware(['permission:remittances.upload', 'throttle:20,1'])->name('transactions.store');
+        Route::put('/transactions/{uuid}', [TransactionController::class, 'update'])
+            ->whereUuid('uuid')->middleware(['permission:remittances.confirm', 'throttle:60,1'])->name('transactions.update');
+        Route::delete('/transactions/{uuid}', [TransactionController::class, 'destroy'])
+            ->whereUuid('uuid')->middleware(['permission:remittances.delete', 'throttle:30,1'])->name('transactions.destroy');
+        Route::put('/transactions/{uuid}/files/{position}/visibility', [TransactionController::class, 'visibility'])
+            ->whereUuid('uuid')->whereNumber('position')
+            ->middleware(['permission:files.set-visibility', 'throttle:60,1'])->name('transactions.visibility');
 
+        // ---- Files ----
+        Route::get('/files', [FileController::class, 'index'])
+            ->middleware('permission:files.view-public')->name('files.index');
+        Route::get('/files/data', [FileController::class, 'data'])
+            ->middleware(['permission:files.view-public', 'throttle:120,1'])->name('files.data');
+        Route::get('/files/{uuid}/{position}', [FileController::class, 'image'])
+            ->whereUuid('uuid')->whereNumber('position')
+            ->middleware(['permission:files.view-public|remittances.view-own|remittances.view-all', 'throttle:600,1'])
+            ->name('files.image');
+
+        // ---- Administration ----
         Route::prefix('admin')->name('admin.')->group(function () {
             Route::middleware('permission:users.manage')->group(function () {
                 Route::get('/users', [UserController::class, 'index'])->name('users.index');

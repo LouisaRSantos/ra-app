@@ -58,9 +58,9 @@ class GroqExtractionTest extends TestCase
         ]);
 
         // sync queue in tests: the job runs inside the upload request
-        $uuid = $this->actingAs($user)->post(route('extractions.store'), [
+        $uuid = $this->actingAs($user)->post(route('transactions.store'), ['engine' => 'groq', 
             'images' => [UploadedFile::fake()->image('voucher.jpg', 800, 600)],
-        ], ['Accept' => 'application/json'])->assertOk()->json('uuid');
+        ], ['Accept' => 'application/json'])->assertCreated()->json('uuid');
 
         $remittance = Remittance::where('uuid', $uuid)->firstOrFail();
         $this->assertSame(ExtractionStatus::Completed, $remittance->status);
@@ -74,12 +74,12 @@ class GroqExtractionTest extends TestCase
         $this->assertNotNull($run->raw_result);
 
         // the review screen and status endpoint render from the database
-        $this->actingAs($user)->getJson("/extractions/{$uuid}/status")->assertOk()->assertJson(['status' => 'completed']);
-        $this->actingAs($user)->get("/extractions/{$uuid}")->assertOk()->assertSee('MADBSI0000001546')->assertSee('0003862139');
-        $this->actingAs($user)->get("/extractions/{$uuid}/image/0")->assertOk();
+        $this->actingAs($user)->getJson("/transactions/{$uuid}/status")->assertOk()->assertJson(['status' => 'completed']);
+        $this->actingAs($user)->getJson("/transactions/{$uuid}")->assertOk()->assertJsonPath("fields.payment_reference_number", "0003862139")->assertJsonPath("invoices.0.si_number", "MADBSI0000001546");
+        $this->actingAs($user)->get("/files/{$uuid}/0")->assertOk();
 
         // confirm: the user's values replace the extracted ones and clear the review flags
-        $this->actingAs($user)->putJson("/extractions/{$uuid}", [
+        $this->actingAs($user)->putJson("/transactions/{$uuid}", [
             'payment_reference_number' => '0003862139',
             'cr_number' => '02404',
             'total_amount' => 1470,
@@ -111,7 +111,7 @@ class GroqExtractionTest extends TestCase
 
         $this->assertSame(ExtractionStatus::Failed, $run->fresh()->status);
         $this->assertSame(ExtractionStatus::Failed, $run->remittance->fresh()->status);
-        $this->actingAs($user)->getJson("/extractions/{$run->remittance->uuid}/status")
+        $this->actingAs($user)->getJson("/transactions/{$run->remittance->uuid}/status")
             ->assertJson(['status' => 'failed'])->assertJsonPath('error_message', fn ($m) => is_string($m) && $m !== '');
     }
 
@@ -121,7 +121,7 @@ class GroqExtractionTest extends TestCase
         $user = $this->specialist();
         $run = RemittanceWriter::createFromUpload($user, [UploadedFile::fake()->image('a.jpg')], ExtractionEngine::Groq);
 
-        $this->actingAs($user)->putJson("/extractions/{$run->remittance->uuid}", [
+        $this->actingAs($user)->putJson("/transactions/{$run->remittance->uuid}", [
             'total_amount' => 1, 'deposit_date' => '2026-10-01',
             'invoices' => [['si_number' => 'SI1', 'amount' => 1, 'cwt_amount' => 0]],
         ])->assertStatus(409);
@@ -156,14 +156,14 @@ class GroqExtractionTest extends TestCase
         $this->groqReplies(['invoices' => []]);
         $owner = $this->specialist();
         $other = $this->specialist();
-        $uuid = $this->actingAs($owner)->post(route('extractions.store'), [
+        $uuid = $this->actingAs($owner)->post(route('transactions.store'), ['engine' => 'groq', 
             'images' => [UploadedFile::fake()->image('a.jpg')],
         ], ['Accept' => 'application/json'])->json('uuid');
 
-        $this->actingAs($other)->getJson("/extractions/{$uuid}/status")->assertNotFound();
-        $this->actingAs($other)->get("/extractions/{$uuid}")->assertNotFound();
-        $this->actingAs($other)->get("/extractions/{$uuid}/image/0")->assertNotFound();
-        $this->actingAs($other)->putJson("/extractions/{$uuid}", [
+        $this->actingAs($other)->getJson("/transactions/{$uuid}/status")->assertNotFound();
+        $this->actingAs($other)->getJson("/transactions/{$uuid}")->assertNotFound();
+        $this->actingAs($other)->get("/files/{$uuid}/0")->assertNotFound();
+        $this->actingAs($other)->putJson("/transactions/{$uuid}", [
             'total_amount' => 1, 'deposit_date' => '2026-10-01',
             'invoices' => [['si_number' => 'SI1', 'amount' => 1, 'cwt_amount' => 0]],
         ])->assertNotFound();

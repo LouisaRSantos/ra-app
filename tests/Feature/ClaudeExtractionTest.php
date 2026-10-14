@@ -69,9 +69,9 @@ class ClaudeExtractionTest extends TestCase
         Storage::fake('local');
         $user = $this->specialist();
 
-        $uuid = $this->actingAs($user)->post(route('claude.store'), [
+        $uuid = $this->actingAs($user)->post(route('transactions.store'), ['engine' => 'claude', 
             'images' => [UploadedFile::fake()->image('a.jpg'), UploadedFile::fake()->image('b.png')],
-        ], ['Accept' => 'application/json'])->assertOk()->json('uuid');
+        ], ['Accept' => 'application/json'])->assertCreated()->json('uuid');
 
         $remittance = Remittance::where('uuid', $uuid)->firstOrFail();
         $this->assertSame($user->id, $remittance->user_id);
