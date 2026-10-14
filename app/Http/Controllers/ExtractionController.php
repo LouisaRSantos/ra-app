@@ -35,12 +35,16 @@ class ExtractionController extends Controller
 
     public function status(string $uuid): JsonResponse
     {
-        $remittance = $this->find($uuid)->load('latestRun');
+        // Polled every couple of seconds, so keep it to one narrow query (two when failed).
+        $remittance = Remittance::visibleTo(auth()->user())->where('uuid', $uuid)->select(['id', 'status'])->firstOrFail();
 
-        return response()->json([
-            'status' => $remittance->status->value,
-            'error_message' => $remittance->status === ExtractionStatus::Failed ? $remittance->reviewData()['error_message'] : null,
-        ]);
+        $error = null;
+        if ($remittance->status === ExtractionStatus::Failed) {
+            $error = $remittance->runs()->latest('id')->value('error')
+                ?: 'We couldn\'t process this document. Please try re-uploading a clearer image.';
+        }
+
+        return response()->json(['status' => $remittance->status->value, 'error_message' => $error]);
     }
 
     public function show(string $uuid)

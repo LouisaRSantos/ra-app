@@ -7,6 +7,7 @@ use App\Http\Controllers\Auth\PasswordController;
 use App\Http\Controllers\ClaudeExtractionController;
 use App\Http\Controllers\ExtractionController;
 use Illuminate\Foundation\Http\Middleware\ValidateCsrfToken;
+use Illuminate\Session\Middleware\AuthenticateSession;
 use Illuminate\Support\Facades\Route;
 
 /*
@@ -35,7 +36,9 @@ Route::prefix('claude-extractions')->name('claude.')->group(function () {
 | Authenticated
 |--------------------------------------------------------------------------
 */
-Route::middleware('auth')->group(function () {
+// auth.session: a password change (e.g. an admin reset) invalidates that user's other sessions,
+// whichever session driver is in use.
+Route::middleware(['auth', AuthenticateSession::class])->group(function () {
     Route::post('/logout', [LoginController::class, 'destroy'])->name('logout');
 
     Route::middleware('account.ok')->group(function () {

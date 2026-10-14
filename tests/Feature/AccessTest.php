@@ -175,6 +175,44 @@ class AccessTest extends TestCase
         $this->actingAs($admin)->putJson("/admin/roles/{$role->id}", ['permissions' => ['made.up']])->assertStatus(422);
     }
 
+    public function test_password_reset_ends_the_users_other_sessions(): void
+    {
+        $user = $this->userWithRole('Account Specialist');
+
+        // a session whose recorded password hash no longer matches (what a reset produces)
+        $this->actingAs($user)->withSession(['password_hash_web' => 'hash-from-before-the-reset'])
+            ->get('/claude-extractions')->assertRedirect('/login');
+    }
+
+    public function test_status_polling_stays_cheap(): void
+    {
+        $user = $this->userWithRole('Account Specialist');
+        $remittance = Remittance::factory()->for($user)->create(['status' => 'processing']);
+
+        $this->actingAs($user)->getJson("/extractions/{$remittance->uuid}/status")->assertOk(); // warm permission cache
+
+        $queries = 0;
+        \Illuminate\Support\Facades\DB::listen(function () use (&$queries) {
+            $queries++;
+        });
+
+        $this->actingAs($user)->getJson("/extractions/{$remittance->uuid}/status")
+            ->assertOk()->assertJson(['status' => 'processing', 'error_message' => null]);
+
+        // user, roles, remittance. Each query is a network round trip against the shared DB.
+        $this->assertLessThanOrEqual(4, $queries, "status endpoint ran {$queries} queries");
+    }
+
+    public function test_failed_status_reports_the_run_error(): void
+    {
+        $user = $this->userWithRole('Account Specialist');
+        $remittance = Remittance::factory()->for($user)->create(['status' => 'failed']);
+        $remittance->runs()->create(['engine' => 'claude', 'status' => 'failed', 'error' => 'Processing took too long.']);
+
+        $this->actingAs($user)->getJson("/extractions/{$remittance->uuid}/status")
+            ->assertOk()->assertJson(['status' => 'failed', 'error_message' => 'Processing took too long.']);
+    }
+
     public function test_claude_callback_stays_public_but_token_protected(): void
     {
         $remittance = Remittance::factory()->create(['status' => 'processing']);

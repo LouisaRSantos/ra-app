@@ -123,9 +123,15 @@ class UserController extends Controller
         return User::role('Admin')->where('is_active', true)->whereKeyNot($except->id)->exists();
     }
 
-    /** Sign the user out everywhere (database session driver). */
+    /**
+     * Sign the user out everywhere right away. Only the database session driver can be searched
+     * by user; with other drivers the `auth.session` middleware (password changed) and the
+     * `account.ok` middleware (account disabled) end the session on the user's next request.
+     */
     private function endSessions(User $user): void
     {
-        DB::table('sessions')->where('user_id', $user->id)->delete();
+        if (config('session.driver') === 'database') {
+            DB::table('sessions')->where('user_id', $user->id)->delete();
+        }
     }
 }

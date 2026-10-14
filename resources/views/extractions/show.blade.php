@@ -94,16 +94,12 @@ $(function () {
     const $banner = $('#processing-banner');
 
     if ($banner.length) {
-        const uuid = $banner.data('uuid');
-        const timer = setInterval(function () {
-            $.get(`/extractions/${uuid}/status`, function (data) {
-                $('#processing-status').text(data.status);
-                if (data.status === 'completed' || data.status === 'failed') {
-                    clearInterval(timer);
-                    window.location.reload();
-                }
-            });
-        }, 2000);
+        window.pollStatus($banner.data('uuid'), function (data) {
+            $('#processing-status').text(data.status);
+            if (data.status === 'completed' || data.status === 'failed') {
+                window.location.reload();
+            }
+        });
     }
 
     $('#review-form').on('submit', function (e) {

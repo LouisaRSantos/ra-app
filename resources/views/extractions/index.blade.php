@@ -48,19 +48,15 @@ $(function () {
     // which silently broke because a `.` in a Math.random()-based id is parsed by CSS as a
     // class-selector separator (`#foo.bar` = id "foo" AND class "bar"), matching nothing.
     function poll(uuid, $row) {
-        pollers[uuid] = setInterval(function () {
-            $.get(`/extractions/${uuid}/status`, function (data) {
-                $row.find('.status').text(data.status);
+        pollers[uuid] = window.pollStatus(uuid, function (data) {
+            $row.find('.status').text(data.status);
 
-                if (data.status === 'completed') {
-                    $row.find('.review-link').removeClass('hidden');
-                    clearInterval(pollers[uuid]);
-                } else if (data.status === 'failed') {
-                    $row.find('.status').text('failed: ' + (data.error_message || 'unknown error'));
-                    clearInterval(pollers[uuid]);
-                }
-            });
-        }, 2000);
+            if (data.status === 'completed') {
+                $row.find('.review-link').removeClass('hidden');
+            } else if (data.status === 'failed') {
+                $row.find('.status').text('failed: ' + (data.error_message || 'unknown error'));
+            }
+        });
     }
 
     $('#upload-form').on('submit', function (e) {
