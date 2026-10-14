@@ -16,7 +16,6 @@ return [
             'remittances.view-own',
             'remittances.confirm',
             'files.set-visibility',
-            'files.view-public',
         ],
         'User' => ['files.view-public'],
     ],

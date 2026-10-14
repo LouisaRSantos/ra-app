@@ -98,7 +98,8 @@ class AccessTest extends TestCase
 
         $this->actingAs($as)->get('/admin/users')->assertForbidden();
         $this->actingAs($as)->get('/admin/roles')->assertForbidden();
-        $this->actingAs($as)->get('/files')->assertOk();
+        // an AS sees only their own records, not the shared public-files list
+        $this->actingAs($as)->get('/files')->assertForbidden();
 
         $this->actingAs($plain)->get('/claude-extractions')->assertForbidden();
         $this->actingAs($plain)->post('/claude-extractions')->assertForbidden();

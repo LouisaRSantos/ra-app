@@ -51,11 +51,11 @@ The routine runs in Anthropic's cloud, so the app must be public:
 | Role | Sees | Can do |
 | --- | --- | --- |
 | Admin | everything | all, including users and roles |
-| Account Specialist (AS) | **own** transactions and files only | upload, review, confirm, mark own files public/private |
+| Account Specialist (AS) | **own** transactions and files only (never another AS's, public or not) | upload, review, confirm, mark own files public/private |
 | User | **public files only** (any AS) | read-only; no transactions or extracted data |
 - Accounts are created by an admin only: **no signup**. Admin sets a temporary password; user must change it at first login (`must_change_password`). Deactivate via `is_active`, do not delete. No self-service reset for now (admin resets). Email invite is a possible later change.
 - Package: `spatie/laravel-permission`. Roles and permission names live in `config/ra.php`; `AccessSeeder` is idempotent (re-run `php artisan db:seed` after editing it). Non-Admin roles are only synced when the role is first created, so changes made in the Roles screen are not overwritten by a re-seed. Admin always holds every permission and cannot be edited.
-- Permissions: `users.manage`, `roles.manage`, `remittances.upload`, `remittances.view-own`, `remittances.view-all`, `remittances.confirm`, `files.set-visibility`, `files.view-public`.
+- Permissions: `users.manage`, `roles.manage`, `remittances.upload`, `remittances.view-own`, `remittances.view-all`, `remittances.confirm`, `files.set-visibility`, `files.view-public` (User role only; the AS does not hold it, so an AS cannot see other specialists' public files).
 - First admin: set `ADMIN_NAME`, `ADMIN_EMAIL`, `ADMIN_PASSWORD` in `.env`, then `php artisan db:seed`. Created with `must_change_password = true`.
 - Guards: login is throttled (6/min), a disabled account fails like a wrong password, sessions are deleted (database driver) on deactivate and password reset, the last active admin cannot be removed/disabled, you cannot demote yourself.
 - Record scope today: `ExtractionStore::getForUser()` returns 404 unless the entry's `user_id` is the caller or the caller has `remittances.view-all`. Every extraction route uses it.
@@ -78,13 +78,24 @@ Everything else is behind `auth` + `account.ok` (active account, password not pe
 - Look: flat colour tokens in `resources/css/app.css` (no gradients, 1px borders, system font, one accent). Reuse the component classes (`.panel`, `.table`, `.btn`, `.badge`, `.modal`, `.field`) before adding new ones. Run `npm run build` after changing CSS/JS or Blade classes.
 - Modals use native `<dialog>`; toasts via `window.toast(message, isError)`.
 
-## Target schema (Phase 2, all `ra_` prefixed, normalized)
+
+## Schema (Phase 2, built and migrated; all `ra_` prefixed, normalized)
 `users 1─< remittances 1─< remittance_files`, `remittances 1─< remittance_invoices >─1 sales_invoices`, `remittances 1─< extraction_runs`.
-- `remittances`: user_id, status, payment_reference_number, cr_number, deposit_date, total_amount, total_cwt_amount, confirmed_by, confirmed_at
-- `remittance_files`: remittance_id, path, mime, original_name, position, is_public
-- `sales_invoices`: si_number (unique)
-- `remittance_invoices` (pivot): remittance_id, sales_invoice_id, amount, cwt_amount
-- `extraction_runs`: remittance_id, engine (groq|claude), status, session_url, seconds, error, raw_result (json), timestamps
+Models in `app/Models`, enums in `app/Enums` (`ExtractionStatus`, `ExtractionEngine`), factories for every table. Tests: `tests/Feature/SchemaTest.php`.
+
+| Table | Columns | Indexes / constraints |
+| --- | --- | --- |
+| `remittances` | uuid (public id, URLs use it), user_id, status, payment_reference_number, cr_number, deposit_date, total_amount `decimal(14,2)`, total_cwt_amount, low_confidence_fields (json), confirmed_by, confirmed_at | unique uuid; (user_id, created_at); (user_id, status); status; created_at; payment_reference_number; cr_number; deposit_date. `user_id` RESTRICT (deactivate users, never delete), `confirmed_by` SET NULL |
+| `remittance_files` | remittance_id, position, path, original_name, mime_type, size, is_public (default false) | unique (remittance_id, position); (is_public, created_at). Cascade with the remittance |
+| `sales_invoices` | si_number | unique si_number; one row per invoice, reused across remittances |
+| `remittance_invoices` | remittance_id, sales_invoice_id, amount, cwt_amount (default 0), low_confidence | unique (remittance_id, sales_invoice_id); FK index on sales_invoice_id. Cascade with the remittance, RESTRICT on the invoice |
+| `extraction_runs` | remittance_id, engine, status, callback_token_hash (sha256, never the token), session_url, fired_at, completed_at, duration_seconds, error, raw_result (json) | (remittance_id, created_at); (status, fired_at) for the sweeper; (engine, status). One row per attempt, so retries and Groq-vs-Claude never overwrite |
+
+Access scopes (use these, never ad hoc filters):
+- `Remittance::visibleTo($user)`: all with `remittances.view-all`, otherwise own only.
+- `RemittanceFile::visibleTo($user)`: public files when the user holds `files.view-public`, plus files of remittances they can see.
+- `ExtractionRun::tokenMatches($token)` compares against the stored hash.
+- Not wired yet: the extraction flow still runs on the cache (`ExtractionStore`). Phase 3 switches both engines to these tables.
 
 ## Phases and status
 | # | Phase | Status |
@@ -92,8 +103,8 @@ Everything else is behind `auth` + `account.ok` (active account, password not pe
 | spike | Claude routine engine (separate module) | done, working end to end |
 | 0 | Foundation: DB prefix, test isolation, migrations on shared DB | done |
 | 1 | Auth (login only), roles, permissions, admin screens for users/roles | done |
-| 2 | Normalized transaction schema | **next** |
-| 3 | Move both engines from cache to the DB, ownership, policies | pending |
+| 2 | Normalized transaction schema | done |
+| 3 | Move both engines from cache to the DB, ownership, policies | **next** |
 | 4 | Admin UI: transactions list/detail, public files screen | pending |
 | 5 | Hardening: audit trail, export, sweeper, deploy to a real domain | pending |
 Each phase has a gate; do not start the next until the gate passes.
@@ -125,3 +136,4 @@ Fields: payment_reference_number, cr_number, total_amount, total_cwt_amount, dep
 - 2026-10-14: `DB_PREFIX=ra_`, SQLite test isolation, base Laravel tables migrated on the shared DB.
 - 2026-10-14: CLAUDE.md created.
 - 2026-10-14: Phase 1 done. Added spatie/laravel-permission, `users.is_active`/`must_change_password` (+ name/is_active indexes), `config/ra.php`, `AccessSeeder`, login/logout/change-password, `EnsureAccountIsUsable` (`account.ok`), admin Users and Roles screens (AJAX, lazy chunks), per-record ownership on all extraction routes, new flat UI shell, tests in `tests/Feature/AccessTest.php`. Extraction routes now require login; callback and signed image route remain public. Migrations (`ra_` tables only) and seeding were run on the shared DB.
+- 2026-10-14: Phase 2 done. Migrations for `remittances`, `remittance_files`, `sales_invoices`, `remittance_invoices`, `extraction_runs` (run on the shared DB, `ra_` tables only), models, enums, factories, `visibleTo` scopes, `tests/Feature/SchemaTest.php`. Removed `files.view-public` from the Account Specialist role (config/ra.php and the DB role) so an AS only ever sees their own files.
