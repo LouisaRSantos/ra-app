@@ -2,16 +2,21 @@
 
 namespace App\Http\Controllers;
 
+use App\Enums\ExtractionEngine;
+use App\Enums\ExtractionStatus;
 use App\Http\Requests\StoreExtractionRequest;
 use App\Http\Requests\UpdateExtractionRequest;
 use App\Jobs\ExtractRemittanceData;
-use App\Support\ExtractionStore;
+use App\Models\Remittance;
+use App\Support\RemittanceWriter;
 use Illuminate\Http\JsonResponse;
-use Illuminate\Http\Response;
 use Illuminate\Support\Facades\Storage;
-use Illuminate\Support\Str;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
+/**
+ * Groq engine plus the review/confirm screens shared with the Claude engine.
+ * Every lookup goes through Remittance::visibleTo(), so another user's record is a 404.
+ */
 class ExtractionController extends Controller
 {
     public function index()
@@ -21,73 +26,51 @@ class ExtractionController extends Controller
 
     public function store(StoreExtractionRequest $request): JsonResponse
     {
-        $files = $request->file('images');
-        $uuid = (string) Str::uuid();
+        $run = RemittanceWriter::createFromUpload($request->user(), $request->file('images'), ExtractionEngine::Groq);
 
-        $diskPaths = [];
-        $mimeTypes = [];
-        $originalFilenames = [];
+        ExtractRemittanceData::dispatch($run->id);
 
-        foreach ($files as $index => $file) {
-            $diskPaths[] = $file->storeAs('extractions', "{$uuid}-{$index}.".$file->getClientOriginalExtension(), 'local');
-            $mimeTypes[] = $file->getMimeType();
-            $originalFilenames[] = $file->getClientOriginalName();
-        }
-
-        ExtractionStore::create($uuid, [
-            'user_id' => $request->user()->id,
-            'disk_paths' => $diskPaths,
-            'mime_types' => $mimeTypes,
-            'original_filenames' => $originalFilenames,
-        ]);
-
-        ExtractRemittanceData::dispatch($uuid);
-
-        return response()->json(['uuid' => $uuid, 'status' => 'pending']);
+        return response()->json(['uuid' => $run->remittance->uuid, 'status' => 'pending']);
     }
 
     public function status(string $uuid): JsonResponse
     {
-        $entry = ExtractionStore::getForUser($uuid);
+        $remittance = $this->find($uuid)->load('latestRun');
 
         return response()->json([
-            'status' => $entry['status'],
-            'error_message' => $entry['status'] === 'failed' ? $entry['error_message'] : null,
+            'status' => $remittance->status->value,
+            'error_message' => $remittance->status === ExtractionStatus::Failed ? $remittance->reviewData()['error_message'] : null,
         ]);
     }
 
     public function show(string $uuid)
     {
-        $entry = ExtractionStore::getForUser($uuid);
-
-        return view('extractions.show', ['uuid' => $uuid, 'entry' => $entry]);
+        return view('extractions.show', ['uuid' => $uuid, 'entry' => $this->find($uuid)->reviewData()]);
     }
 
     public function update(UpdateExtractionRequest $request, string $uuid): JsonResponse
     {
-        ExtractionStore::getForUser($uuid);
+        $remittance = $this->find($uuid);
 
-        ExtractionStore::update($uuid, [
-            'payment_reference_number' => $request->input('payment_reference_number'),
-            'cr_number' => $request->input('cr_number'),
-            'total_amount' => $request->input('total_amount'),
-            'total_cwt_amount' => $request->input('total_cwt_amount'),
-            'deposit_date' => $request->input('deposit_date'),
-            'invoices' => $request->input('invoices'),
-            'low_confidence_fields' => [],
-            'confirmed' => true,
-        ]);
+        // Only a finished extraction can be confirmed.
+        abort_unless($remittance->status === ExtractionStatus::Completed, 409);
+
+        RemittanceWriter::confirm($remittance, $request->validated(), $request->user());
 
         return response()->json(['confirmed' => true]);
     }
 
     public function image(string $uuid, int $index): StreamedResponse
     {
-        $entry = ExtractionStore::getForUser($uuid);
+        $file = $this->find($uuid)->files()->where('position', $index)->firstOrFail();
 
-        abort_unless(array_key_exists($index, $entry['disk_paths']), 404);
-        abort_unless(Storage::disk('local')->exists($entry['disk_paths'][$index]), 404);
+        abort_unless(Storage::disk('local')->exists($file->path), 404);
 
-        return Storage::disk('local')->response($entry['disk_paths'][$index]);
+        return Storage::disk('local')->response($file->path);
+    }
+
+    private function find(string $uuid): Remittance
+    {
+        return Remittance::visibleTo(auth()->user())->where('uuid', $uuid)->firstOrFail();
     }
 }

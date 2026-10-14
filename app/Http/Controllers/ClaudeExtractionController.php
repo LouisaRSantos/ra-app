@@ -2,15 +2,17 @@
 
 namespace App\Http\Controllers;
 
+use App\Enums\ExtractionEngine;
+use App\Enums\ExtractionStatus;
 use App\Http\Requests\StoreExtractionRequest;
 use App\Jobs\DispatchClaudeExtraction;
-use App\Support\ExtractionStore;
+use App\Models\Remittance;
+use App\Support\RemittanceWriter;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Validator;
-use Illuminate\Support\Str;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
 /**
@@ -25,52 +27,35 @@ class ClaudeExtractionController extends Controller
 
     public function store(StoreExtractionRequest $request): JsonResponse
     {
-        $uuid = (string) Str::uuid();
-        $entry = ['user_id' => $request->user()->id, 'disk_paths' => [], 'mime_types' => [], 'original_filenames' => []];
+        $run = RemittanceWriter::createFromUpload($request->user(), $request->file('images'), ExtractionEngine::Claude);
 
-        foreach ($request->file('images') as $index => $file) {
-            $entry['disk_paths'][] = $file->storeAs('extractions', "{$uuid}-{$index}.".$file->getClientOriginalExtension(), 'local');
-            $entry['mime_types'][] = $file->getMimeType();
-            $entry['original_filenames'][] = $file->getClientOriginalName();
-        }
+        DispatchClaudeExtraction::dispatch($run->id);
 
-        ExtractionStore::create($uuid, $entry);
-
-        DispatchClaudeExtraction::dispatch($uuid);
-
-        return response()->json(['uuid' => $uuid, 'status' => 'pending']);
+        return response()->json(['uuid' => $run->remittance->uuid, 'status' => 'pending']);
     }
 
     /** Public endpoint: the body comes from a model reading user-uploaded images, so treat it as untrusted. */
     public function callback(Request $request, string $uuid): JsonResponse
     {
-        $entry = ExtractionStore::get($uuid);
-
-        abort_if($entry === null, 404);
+        $remittance = Remittance::where('uuid', $uuid)->firstOrFail();
+        $run = $remittance->runs()->where('engine', ExtractionEngine::Claude)->latest('id')->first();
 
         // Only a run in flight can be completed; this also makes a replay a 409.
-        if ($entry['status'] !== 'processing' || empty($entry['callback_token'])) {
+        if ($run === null || $run->status !== ExtractionStatus::Processing || $run->callback_token_hash === null) {
             return response()->json(['message' => 'Not awaiting a result.'], 409);
         }
 
-        if (! hash_equals($entry['callback_token'], (string) $request->bearerToken())) {
+        if (! $run->tokenMatches($request->bearerToken())) {
             return response()->json(['message' => 'Invalid token.'], 403);
         }
 
-        // From here the token is spent, whatever the payload turns out to be.
-        $reject = function (string $message, int $code): JsonResponse {
-            return response()->json(['message' => $message], $code);
-        };
-        $markFailed = fn () => ExtractionStore::update($uuid, [
-            'status' => 'failed',
-            'callback_token' => null,
-            'error_message' => 'We couldn\'t read this document. Please try re-uploading a clearer image.',
-        ]);
+        // From here the token is spent (fail/complete clear it), whatever the payload turns out to be.
+        $unreadable = 'We couldn\'t read this document. Please try re-uploading a clearer image.';
 
         if ($request->input('error') !== null) {
-            $markFailed();
+            RemittanceWriter::fail($run, $unreadable);
 
-            return $reject('Routine reported an error.', 200);
+            return response()->json(['message' => 'Routine reported an error.']);
         }
 
         $validator = Validator::make($request->all(), [
@@ -82,37 +67,25 @@ class ClaudeExtractionController extends Controller
             'low_confidence_fields' => ['nullable', 'array'],
             'low_confidence_fields.*' => ['string', 'max:100'],
             'invoices' => ['present', 'array', 'max:100'],
-            'invoices.*.si_number' => ['required', 'string', 'max:255'],
+            'invoices.*.si_number' => ['required', 'string', 'max:64'],
             'invoices.*.amount' => ['nullable', 'numeric'],
             'invoices.*.cwt_amount' => ['nullable', 'numeric'],
             'invoices.*.low_confidence_fields' => ['nullable', 'array'],
         ]);
 
         if ($validator->fails()) {
-            $markFailed();
+            RemittanceWriter::fail($run, $unreadable);
 
-            return $reject('Invalid payload.', 422);
+            return response()->json(['message' => 'Invalid payload.'], 422);
         }
 
-        $data = $validator->validated();
-
-        ExtractionStore::update($uuid, [
-            'status' => 'completed',
-            'callback_token' => null,
-            'payment_reference_number' => $data['payment_reference_number'] ?? null,
-            'cr_number' => $data['cr_number'] ?? null,
-            'total_amount' => $data['total_amount'] ?? null,
-            'total_cwt_amount' => $data['total_cwt_amount'] ?? null,
-            'deposit_date' => $data['deposit_date'] ?? null,
-            'low_confidence_fields' => $data['low_confidence_fields'] ?? [],
-            'invoices' => $data['invoices'],
-        ]);
+        RemittanceWriter::complete($run, $validator->validated());
 
         Log::info('Claude routine completed', [
             'uuid' => $uuid,
-            'seconds' => isset($entry['fired_at']) ? now()->timestamp - $entry['fired_at'] : null,
-            'images' => count($entry['disk_paths']),
-            'session_url' => $entry['routine_session_url'] ?? null,
+            'seconds' => $run->fresh()->duration_seconds,
+            'images' => $remittance->files()->count(),
+            'session_url' => $run->session_url,
         ]);
 
         return response()->json(['ok' => true]);
@@ -121,11 +94,10 @@ class ClaudeExtractionController extends Controller
     /** Fetched by the routine; protected by the `signed` middleware (expiring URL). */
     public function image(string $uuid, int $index): StreamedResponse
     {
-        $entry = ExtractionStore::get($uuid);
+        $file = Remittance::where('uuid', $uuid)->firstOrFail()->files()->where('position', $index)->firstOrFail();
 
-        abort_if($entry === null, 404);
-        abort_unless(isset($entry['disk_paths'][$index]) && Storage::disk('local')->exists($entry['disk_paths'][$index]), 404);
+        abort_unless(Storage::disk('local')->exists($file->path), 404);
 
-        return Storage::disk('local')->response($entry['disk_paths'][$index]);
+        return Storage::disk('local')->response($file->path);
     }
 }

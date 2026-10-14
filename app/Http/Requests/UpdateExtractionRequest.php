@@ -20,7 +20,7 @@ class UpdateExtractionRequest extends FormRequest
             'total_cwt_amount' => ['nullable', 'numeric'],
             'deposit_date' => ['required', 'date'],
             'invoices' => ['required', 'array', 'min:1'],
-            'invoices.*.si_number' => ['required', 'string', 'max:255'],
+            'invoices.*.si_number' => ['required', 'string', 'max:64'],
             'invoices.*.amount' => ['required', 'numeric'],
             'invoices.*.cwt_amount' => ['required', 'numeric'],
             // NOTE: total_amount ≈ sum(invoices.*.amount - invoices.*.cwt_amount) is the expected

@@ -3,7 +3,8 @@
 namespace Tests\Feature;
 
 use App\Models\User;
-use App\Support\ExtractionStore;
+use App\Models\ExtractionRun;
+use App\Models\Remittance;
 use Database\Seeders\AccessSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
@@ -112,17 +113,18 @@ class AccessTest extends TestCase
         $owner = $this->userWithRole('Account Specialist');
         $other = $this->userWithRole('Account Specialist');
         $admin = $this->userWithRole('Admin');
-        ExtractionStore::create('abc', ['user_id' => $owner->id, 'disk_paths' => ['extractions/abc-0.jpg']]);
+        $remittance = Remittance::factory()->completed()->for($owner)->create();
+        $uuid = $remittance->uuid;
 
-        $this->actingAs($owner)->getJson('/extractions/abc/status')->assertOk();
-        $this->actingAs($other)->getJson('/extractions/abc/status')->assertNotFound();
-        $this->actingAs($other)->get('/extractions/abc')->assertNotFound();
-        $this->actingAs($other)->get('/extractions/abc/image/0')->assertNotFound();
-        $this->actingAs($other)->putJson('/extractions/abc', [
+        $this->actingAs($owner)->getJson("/extractions/{$uuid}/status")->assertOk();
+        $this->actingAs($other)->getJson("/extractions/{$uuid}/status")->assertNotFound();
+        $this->actingAs($other)->get("/extractions/{$uuid}")->assertNotFound();
+        $this->actingAs($other)->get("/extractions/{$uuid}/image/0")->assertNotFound();
+        $this->actingAs($other)->putJson("/extractions/{$uuid}", [
             'total_amount' => 1, 'deposit_date' => '2026-10-01', 'invoices' => [['si_number' => 'SI1', 'amount' => 1, 'cwt_amount' => 0]],
         ])->assertNotFound();
-        $this->assertFalse(ExtractionStore::get('abc')['confirmed']);
-        $this->actingAs($admin)->getJson('/extractions/abc/status')->assertOk();
+        $this->assertFalse($remittance->fresh()->isConfirmed());
+        $this->actingAs($admin)->getJson("/extractions/{$uuid}/status")->assertOk();
     }
 
     public function test_admin_manages_users(): void
@@ -175,10 +177,14 @@ class AccessTest extends TestCase
 
     public function test_claude_callback_stays_public_but_token_protected(): void
     {
-        ExtractionStore::create('cb1', ['user_id' => 1]);
-        ExtractionStore::update('cb1', ['status' => 'processing', 'callback_token' => 'tok']);
+        $remittance = Remittance::factory()->create(['status' => 'processing']);
+        $remittance->runs()->create([
+            'engine' => 'claude',
+            'status' => 'processing',
+            'callback_token_hash' => ExtractionRun::hashToken('tok'),
+        ]);
 
-        $this->postJson('/claude-extractions/cb1/result', [])->assertForbidden();
-        $this->withToken('tok')->postJson('/claude-extractions/cb1/result', ['invoices' => []])->assertOk();
+        $this->postJson("/claude-extractions/{$remittance->uuid}/result", [])->assertForbidden();
+        $this->withToken('tok')->postJson("/claude-extractions/{$remittance->uuid}/result", ['invoices' => []])->assertOk();
     }
 }

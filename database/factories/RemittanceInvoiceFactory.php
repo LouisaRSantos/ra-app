@@ -17,7 +17,7 @@ class RemittanceInvoiceFactory extends Factory
             'sales_invoice_id' => SalesInvoice::factory(),
             'amount' => fake()->randomFloat(2, 100, 50000),
             'cwt_amount' => 0,
-            'low_confidence' => false,
+            'low_confidence_fields' => [],
         ];
     }
 }

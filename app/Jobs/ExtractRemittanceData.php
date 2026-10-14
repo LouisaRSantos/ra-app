@@ -2,7 +2,9 @@
 
 namespace App\Jobs;
 
-use App\Support\ExtractionStore;
+use App\Enums\ExtractionStatus;
+use App\Models\ExtractionRun;
+use App\Support\RemittanceWriter;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -21,7 +23,7 @@ class ExtractRemittanceData implements ShouldQueue
 
     public int $timeout = 90;
 
-    public function __construct(private readonly string $uuid)
+    public function __construct(private readonly int $runId)
     {
     }
 
@@ -32,37 +34,28 @@ class ExtractRemittanceData implements ShouldQueue
 
     public function handle(): void
     {
-        $entry = ExtractionStore::get($this->uuid);
+        $run = ExtractionRun::with('remittance.files')->find($this->runId);
 
         // 'processing' is expected here on a queue retry attempt (this same job re-running
-        // after a transient failure) — only completed/failed are terminal states to bail on.
-        if ($entry === null || in_array($entry['status'], ['completed', 'failed'], true)) {
+        // after a transient failure); only completed/failed are terminal states to bail on.
+        if ($run === null || in_array($run->status, [ExtractionStatus::Completed, ExtractionStatus::Failed], true)) {
             return;
         }
 
-        ExtractionStore::update($this->uuid, ['status' => 'processing']);
+        RemittanceWriter::markProcessing($run);
 
         try {
-            $extracted = $this->extract($entry['disk_paths']);
+            $extracted = $this->extract($run->remittance->files->pluck('path')->all());
 
-            ExtractionStore::update($this->uuid, [
-                'status' => 'completed',
-                'payment_reference_number' => $extracted['payment_reference_number'] ?? null,
-                'cr_number' => $extracted['cr_number'] ?? null,
-                'total_amount' => $extracted['total_amount'] ?? null,
-                'total_cwt_amount' => $extracted['total_cwt_amount'] ?? null,
-                'deposit_date' => $extracted['deposit_date'] ?? null,
-                'low_confidence_fields' => $extracted['low_confidence_fields'] ?? [],
-                'invoices' => $extracted['invoices'],
-            ]);
+            RemittanceWriter::complete($run, $extracted);
         } catch (Throwable $e) {
             Log::error('Remittance extraction attempt failed', [
-                'uuid' => $this->uuid,
+                'uuid' => $run->remittance->uuid,
                 'attempt' => $this->attempts(),
                 'message' => $e->getMessage(),
             ]);
 
-            // Rethrow so the queue's own retry/backoff ($tries/backoff() below) actually
+            // Rethrow so the queue's own retry/backoff ($tries/backoff() above) actually
             // kicks in; failed() marks the user-facing status once retries are exhausted.
             throw $e;
         }
@@ -70,10 +63,11 @@ class ExtractRemittanceData implements ShouldQueue
 
     public function failed(?Throwable $exception): void
     {
-        ExtractionStore::update($this->uuid, [
-            'status' => 'failed',
-            'error_message' => 'We couldn\'t process this document. Please try re-uploading a clearer image.',
-        ]);
+        $run = ExtractionRun::find($this->runId);
+
+        if ($run !== null && in_array($run->status, [ExtractionStatus::Pending, ExtractionStatus::Processing], true)) {
+            RemittanceWriter::fail($run, 'We couldn\'t process this document. Please try re-uploading a clearer image.');
+        }
     }
 
     /**

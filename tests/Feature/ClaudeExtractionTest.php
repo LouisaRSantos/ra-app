@@ -2,9 +2,13 @@
 
 namespace Tests\Feature;
 
+use App\Enums\ExtractionEngine;
+use App\Enums\ExtractionStatus;
 use App\Jobs\DispatchClaudeExtraction;
 use App\Jobs\ExpireClaudeExtraction;
-use App\Support\ExtractionStore;
+use App\Models\ExtractionRun;
+use App\Models\Remittance;
+use App\Models\RemittanceFile;
 use App\Models\User;
 use Database\Seeders\AccessSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -12,6 +16,7 @@ use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\URL;
 use Tests\TestCase;
 
 class ClaudeExtractionTest extends TestCase
@@ -24,110 +29,204 @@ class ClaudeExtractionTest extends TestCase
         'total_amount' => 1500.0,
         'total_cwt_amount' => 0,
         'deposit_date' => '2026-10-01',
-        'low_confidence_fields' => [],
-        'invoices' => [['si_number' => 'MADBSI0000001546', 'amount' => 1500, 'cwt_amount' => 0]],
+        'low_confidence_fields' => ['deposit_date'],
+        'invoices' => [['si_number' => 'madbsi0000001546', 'amount' => 1500, 'cwt_amount' => 0]],
     ];
 
-    private function processing(string $token = 'secret'): string
+    protected function setUp(): void
     {
-        ExtractionStore::create('u1', ['disk_paths' => ['extractions/u1-0.jpg']]);
-        ExtractionStore::update('u1', ['status' => 'processing', 'callback_token' => $token]);
-
-        return 'u1';
+        parent::setUp();
+        $this->seed(AccessSeeder::class);
     }
 
-    private function postResult(array $body, string $token = 'secret')
+    private function specialist(): User
     {
-        return $this->withToken($token)->postJson(route('claude.callback', 'u1'), $body);
+        return tap(User::factory()->create())->assignRole('Account Specialist');
     }
 
-    public function test_upload_dispatches_job(): void
+    /** A remittance with one page and a Claude run, optionally already fired with $token. */
+    private function makeRun(string $status = 'pending', ?string $token = null): ExtractionRun
+    {
+        $remittance = Remittance::factory()->for($this->specialist())->create(['status' => $status]);
+        RemittanceFile::factory()->for($remittance)->create(['position' => 0]);
+
+        return $remittance->runs()->create([
+            'engine' => ExtractionEngine::Claude,
+            'status' => $status,
+            'callback_token_hash' => $token ? ExtractionRun::hashToken($token) : null,
+            'fired_at' => $status === 'processing' ? now()->subSeconds(42) : null,
+        ]);
+    }
+
+    private function postResult(ExtractionRun $run, array $body, ?string $token = 'secret')
+    {
+        return $this->withToken((string) $token)->postJson(route('claude.callback', $run->remittance->uuid), $body);
+    }
+
+    public function test_upload_creates_remittance_files_and_run_and_dispatches(): void
     {
         Queue::fake();
         Storage::fake('local');
-        $this->seed(AccessSeeder::class);
-        $user = tap(User::factory()->create())->assignRole('Account Specialist');
+        $user = $this->specialist();
 
-        $uuid = $this->actingAs($user)->post(route('claude.store'), ['images' => [UploadedFile::fake()->image('a.jpg')]], ['Accept' => 'application/json'])
-            ->assertOk()->json('uuid');
+        $uuid = $this->actingAs($user)->post(route('claude.store'), [
+            'images' => [UploadedFile::fake()->image('a.jpg'), UploadedFile::fake()->image('b.png')],
+        ], ['Accept' => 'application/json'])->assertOk()->json('uuid');
 
+        $remittance = Remittance::where('uuid', $uuid)->firstOrFail();
+        $this->assertSame($user->id, $remittance->user_id);
+        $this->assertSame(ExtractionStatus::Pending, $remittance->status);
+        $this->assertSame(['a.jpg', 'b.png'], $remittance->files->pluck('original_name')->all());
+        $this->assertSame(ExtractionEngine::Claude, $remittance->runs->first()->engine);
+        Storage::disk('local')->assertExists($remittance->files[0]->path);
         Queue::assertPushed(DispatchClaudeExtraction::class);
-        $this->assertSame('pending', ExtractionStore::get($uuid)['status']);
-        $this->assertSame($user->id, ExtractionStore::get($uuid)['user_id']);
     }
 
-    public function test_job_fires_routine_and_sets_processing(): void
+    public function test_job_fires_routine_and_stores_only_the_token_hash(): void
     {
         Queue::fake([ExpireClaudeExtraction::class]);
         Http::fake(['api.anthropic.com/*' => Http::response(['claude_code_session_url' => 'https://claude.ai/code/s1'])]);
-        ExtractionStore::create('u1', ['disk_paths' => ['extractions/u1-0.jpg']]);
+        $run = $this->makeRun();
 
-        DispatchClaudeExtraction::dispatchSync('u1');
+        DispatchClaudeExtraction::dispatchSync($run->id);
 
-        $entry = ExtractionStore::get('u1');
-        $this->assertSame('processing', $entry['status']);
-        $this->assertSame('https://claude.ai/code/s1', $entry['routine_session_url']);
-        Http::assertSent(fn ($r) => $r->hasHeader('anthropic-beta') && str_contains($r['text'], 'image_urls'));
+        $run->refresh();
+        $this->assertSame(ExtractionStatus::Processing, $run->status);
+        $this->assertSame(ExtractionStatus::Processing, $run->remittance->status);
+        $this->assertSame('https://claude.ai/code/s1', $run->session_url);
+
+        Http::assertSent(function ($request) use ($run) {
+            $sent = json_decode($request['text'], true);
+
+            // the routine got a signed image URL and a token whose hash is what we stored
+            return $request->hasHeader('anthropic-beta')
+                && str_contains($sent['image_urls'][0], 'signature=')
+                && $run->fresh()->tokenMatches($sent['callback_token'])
+                && $sent['callback_token'] !== $run->callback_token_hash;
+        });
         Queue::assertPushed(ExpireClaudeExtraction::class);
     }
 
     public function test_fire_error_marks_failed_without_retry(): void
     {
         Http::fake(['api.anthropic.com/*' => Http::response([], 500)]);
-        ExtractionStore::create('u1', ['disk_paths' => ['extractions/u1-0.jpg']]);
+        $run = $this->makeRun();
 
-        DispatchClaudeExtraction::dispatchSync('u1');
+        DispatchClaudeExtraction::dispatchSync($run->id);
 
-        $this->assertSame('failed', ExtractionStore::get('u1')['status']);
+        $run->refresh();
+        $this->assertSame(ExtractionStatus::Failed, $run->status);
+        $this->assertSame(ExtractionStatus::Failed, $run->remittance->status);
+        $this->assertNull($run->callback_token_hash);
         Http::assertSentCount(1);
     }
 
-    public function test_valid_callback_completes_and_replay_is_409(): void
+    public function test_quota_hit_goes_back_to_pending(): void
     {
-        $this->processing();
+        Http::fake(['api.anthropic.com/*' => Http::response([], 429, ['Retry-After' => '120'])]);
+        $run = $this->makeRun();
 
-        $this->postResult(self::PAYLOAD)->assertOk();
-        $this->assertSame('completed', ExtractionStore::get('u1')['status']);
-        $this->assertSame('CR-1234', ExtractionStore::get('u1')['cr_number']);
+        DispatchClaudeExtraction::dispatchSync($run->id);
 
-        $this->postResult(self::PAYLOAD)->assertStatus(409);
+        $this->assertSame(ExtractionStatus::Pending, $run->fresh()->status);
+        $this->assertNull($run->fresh()->callback_token_hash);
+    }
+
+    public function test_valid_callback_saves_normalised_rows_and_replay_is_409(): void
+    {
+        $run = $this->makeRun('processing', 'secret');
+
+        $this->postResult($run, self::PAYLOAD)->assertOk();
+
+        $remittance = $run->remittance->fresh();
+        $this->assertSame(ExtractionStatus::Completed, $remittance->status);
+        $this->assertSame('CR-1234', $remittance->cr_number);
+        $this->assertSame('1500.00', $remittance->total_amount);
+        $this->assertSame('2026-10-01', $remittance->deposit_date->toDateString());
+        $this->assertSame(['deposit_date'], $remittance->low_confidence_fields);
+        $this->assertSame('MADBSI0000001546', $remittance->lines->first()->salesInvoice->si_number);
+        $this->assertNull($run->fresh()->callback_token_hash);
+        $this->assertSame(42, $run->fresh()->duration_seconds);
+        $this->assertSame('CHK-5678', $run->fresh()->raw_result['payment_reference_number']);
+
+        $this->postResult($run, self::PAYLOAD)->assertStatus(409);
     }
 
     public function test_wrong_token_is_403_and_leaves_run_open(): void
     {
-        $this->processing();
+        $run = $this->makeRun('processing', 'secret');
 
-        $this->postResult(self::PAYLOAD, 'wrong')->assertStatus(403);
-        $this->assertSame('processing', ExtractionStore::get('u1')['status']);
+        $this->postResult($run, self::PAYLOAD, 'wrong')->assertForbidden();
+        $this->postJson(route('claude.callback', $run->remittance->uuid), self::PAYLOAD)->assertForbidden();
+
+        $this->assertSame(ExtractionStatus::Processing, $run->fresh()->status);
     }
 
-    public function test_malformed_payload_fails_run(): void
+    public function test_callback_on_unfired_or_unknown_run(): void
     {
-        $this->processing();
+        $this->postResult($this->makeRun('pending'), self::PAYLOAD)->assertStatus(409);
+        $this->withToken('x')->postJson(route('claude.callback', '00000000-0000-0000-0000-000000000000'), [])->assertNotFound();
+    }
 
-        $this->postResult(['invoices' => 'nope', 'total_amount' => 'abc'])->assertStatus(422);
-        $this->assertSame('failed', ExtractionStore::get('u1')['status']);
+    public function test_malformed_payload_fails_run_and_spends_token(): void
+    {
+        $run = $this->makeRun('processing', 'secret');
+
+        $this->postResult($run, ['invoices' => 'nope', 'total_amount' => 'abc'])->assertStatus(422);
+
+        $this->assertSame(ExtractionStatus::Failed, $run->fresh()->status);
+        $this->postResult($run, self::PAYLOAD)->assertStatus(409);
+    }
+
+    public function test_overlong_si_number_is_rejected_not_a_500(): void
+    {
+        $run = $this->makeRun('processing', 'secret');
+
+        $this->postResult($run, ['invoices' => [['si_number' => str_repeat('A', 65)]]])->assertStatus(422);
     }
 
     public function test_routine_error_fails_run(): void
     {
-        $this->processing();
+        $run = $this->makeRun('processing', 'secret');
 
-        $this->postResult(['error' => 'unreadable']);
-        $this->assertSame('failed', ExtractionStore::get('u1')['status']);
+        $this->postResult($run, ['error' => 'unreadable'])->assertOk();
+
+        $this->assertSame(ExtractionStatus::Failed, $run->fresh()->status);
+        $this->assertSame(ExtractionStatus::Failed, $run->remittance->fresh()->status);
     }
 
     public function test_expiry_fails_stuck_run(): void
     {
-        $this->processing();
+        $run = $this->makeRun('processing', 'secret');
 
-        ExpireClaudeExtraction::dispatchSync('u1');
+        ExpireClaudeExtraction::dispatchSync($run->id);
 
-        $this->assertSame('failed', ExtractionStore::get('u1')['status']);
+        $this->assertSame(ExtractionStatus::Failed, $run->fresh()->status);
+        $this->assertSame(ExtractionStatus::Failed, $run->remittance->fresh()->status);
+        $this->postResult($run, self::PAYLOAD)->assertStatus(409);
     }
 
-    public function test_unsigned_image_url_is_rejected(): void
+    public function test_expiry_leaves_finished_run_alone(): void
     {
-        $this->get('/claude-extractions/u1/image/0')->assertStatus(403);
+        $run = $this->makeRun('processing', 'secret');
+        $this->postResult($run, self::PAYLOAD)->assertOk();
+
+        ExpireClaudeExtraction::dispatchSync($run->id);
+
+        $this->assertSame(ExtractionStatus::Completed, $run->fresh()->status);
+    }
+
+    public function test_signed_image_url_serves_the_page_and_unsigned_is_rejected(): void
+    {
+        Storage::fake('local');
+        $run = $this->makeRun();
+        $file = $run->remittance->files->first();
+        Storage::disk('local')->put($file->path, 'jpegbytes');
+        $uuid = $run->remittance->uuid;
+
+        $signed = URL::temporarySignedRoute('claude.image', now()->addMinutes(5), ['uuid' => $uuid, 'index' => 0]);
+
+        $this->get($signed)->assertOk();
+        $this->get("/claude-extractions/{$uuid}/image/0")->assertForbidden();
     }
 }

@@ -11,14 +11,14 @@ class RemittanceInvoice extends Model
 {
     use HasFactory;
 
-    protected $fillable = ['remittance_id', 'sales_invoice_id', 'amount', 'cwt_amount', 'low_confidence'];
+    protected $fillable = ['remittance_id', 'sales_invoice_id', 'amount', 'cwt_amount', 'low_confidence_fields'];
 
     protected function casts(): array
     {
         return [
             'amount' => 'decimal:2',
             'cwt_amount' => 'decimal:2',
-            'low_confidence' => 'boolean',
+            'low_confidence_fields' => 'array',
         ];
     }
 

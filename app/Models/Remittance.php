@@ -18,6 +18,8 @@ class Remittance extends Model
     protected $fillable = [
         'user_id', 'status', 'payment_reference_number', 'cr_number', 'deposit_date',
         'total_amount', 'total_cwt_amount', 'low_confidence_fields',
+        // set only by RemittanceWriter::confirm(), never from request input
+        'confirmed_by', 'confirmed_at',
     ];
 
     protected function casts(): array
@@ -77,6 +79,34 @@ class Remittance extends Model
     public function isConfirmed(): bool
     {
         return $this->confirmed_at !== null;
+    }
+
+    /** Flat array the review screen renders from (kept stable so the Blade view stays simple). */
+    public function reviewData(): array
+    {
+        $this->loadMissing(['files', 'lines.salesInvoice', 'latestRun']);
+
+        return [
+            'status' => $this->status->value,
+            'error_message' => $this->status === ExtractionStatus::Failed
+                ? ($this->latestRun?->error ?: 'We couldn\'t process this document. Please try re-uploading a clearer image.')
+                : null,
+            'disk_paths' => $this->files->pluck('path')->all(),
+            'original_filenames' => $this->files->pluck('original_name')->all(),
+            'payment_reference_number' => $this->payment_reference_number,
+            'cr_number' => $this->cr_number,
+            'total_amount' => $this->total_amount,
+            'total_cwt_amount' => $this->total_cwt_amount,
+            'deposit_date' => $this->deposit_date?->toDateString(),
+            'low_confidence_fields' => $this->low_confidence_fields ?? [],
+            'invoices' => $this->lines->map(fn (RemittanceInvoice $l) => [
+                'si_number' => $l->salesInvoice->si_number,
+                'amount' => $l->amount,
+                'cwt_amount' => $l->cwt_amount,
+                'low_confidence_fields' => $l->low_confidence_fields ?? [],
+            ])->all(),
+            'confirmed' => $this->isConfirmed(),
+        ];
     }
 
     /**

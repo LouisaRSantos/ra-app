@@ -21,7 +21,7 @@ Two extraction engines, kept side by side:
 | **Groq** (original) | `/extractions` | `ExtractRemittanceData` job calls the Groq vision API synchronously with base64 images |
 | **Claude routine** (new) | `/claude-extractions` | `DispatchClaudeExtraction` fires a Claude Code routine; the routine fetches signed image URLs and POSTs the result to a public callback |
 
-Both write into `App\Support\ExtractionStore` (cache, 1h TTL, keyed by uuid) and share the review screens (`/extractions/{uuid}`, status, update). This is **temporary**; Phase 3 moves it to the database.
+Both engines write through `App\Support\RemittanceWriter` into the database (`remittances`, `remittance_files`, `remittance_invoices`, `sales_invoices`, `extraction_runs`) and share the review screens (`/extractions/{uuid}`, status, update). The uuid in every URL is `remittances.uuid`. The old cache store (`ExtractionStore`) no longer exists.
 
 ## Claude routine flow
 Upload → `ClaudeExtractionController@store` (status `pending`) → job `DispatchClaudeExtraction` builds 30-min signed image URLs + one-time token, calls `RoutineClient::fire` (status `processing`) → routine downloads images, extracts, POSTs JSON to `claude.callback` with `Authorization: Bearer <token>` → callback checks status (`409` on replay), token (`403`), validates payload (`422` + failed), saves, status `completed` → user reviews and confirms.
@@ -58,7 +58,7 @@ The routine runs in Anthropic's cloud, so the app must be public:
 - Permissions: `users.manage`, `roles.manage`, `remittances.upload`, `remittances.view-own`, `remittances.view-all`, `remittances.confirm`, `files.set-visibility`, `files.view-public` (User role only; the AS does not hold it, so an AS cannot see other specialists' public files).
 - First admin: set `ADMIN_NAME`, `ADMIN_EMAIL`, `ADMIN_PASSWORD` in `.env`, then `php artisan db:seed`. Created with `must_change_password = true`.
 - Guards: login is throttled (6/min), a disabled account fails like a wrong password, sessions are deleted (database driver) on deactivate and password reset, the last active admin cannot be removed/disabled, you cannot demote yourself.
-- Record scope today: `ExtractionStore::getForUser()` returns 404 unless the entry's `user_id` is the caller or the caller has `remittances.view-all`. Every extraction route uses it.
+- Record scope: every extraction route looks the record up through `Remittance::visibleTo($user)`, so another user's record is a 404 (not 403). Only the signed image route and the callback look up by uuid without a user.
 - Visibility is per file (`is_public`, default private) once the files table exists (Phase 2). Enforce scope at the query/policy level, not only in the UI.
 
 ## Endpoints (keep this list accurate; anything not here must require login)
@@ -95,7 +95,18 @@ Access scopes (use these, never ad hoc filters):
 - `Remittance::visibleTo($user)`: all with `remittances.view-all`, otherwise own only.
 - `RemittanceFile::visibleTo($user)`: public files when the user holds `files.view-public`, plus files of remittances they can see.
 - `ExtractionRun::tokenMatches($token)` compares against the stored hash.
-- Not wired yet: the extraction flow still runs on the cache (`ExtractionStore`). Phase 3 switches both engines to these tables.
+- Wired in Phase 3: both engines read/write only through `RemittanceWriter` (see below). Invoice lines keep per-field review flags in `remittance_invoices.low_confidence_fields` (json).
+
+## Extraction pipeline (database-backed, Phase 3)
+`RemittanceWriter` (`app/Support`) is the only code that writes remittances, files, lines and runs:
+- `createFromUpload(user, files, engine)`: transaction creating the remittance (pending), its files (private disk `local`, name `{uuid}-{position}.{content-guessed ext}`) and a pending `ExtractionRun`.
+- `markProcessing` / `markPending` / `fail` / `complete`: run and remittance status move together. `fail` and `complete` always clear `callback_token_hash`, so a token is single use.
+- `complete(run, raw)`: `normalize()` (lenient: bad values become null, SI numbers trimmed/upper-cased/64 chars/deduped, money to exact 2-decimal strings, dates to Y-m-d), replaces the invoice lines, stores the engine's raw JSON on the run, records duration.
+- `confirm(remittance, input, user)`: same normalisation, clears review flags, sets `confirmed_by/at`. Only a `completed` remittance can be confirmed (409 otherwise).
+- Jobs take the run id (`ExtractRemittanceData` for Groq, `DispatchClaudeExtraction`, `ExpireClaudeExtraction`). The Claude job stores token hash + `processing` BEFORE firing, and goes back to `pending` on a 429.
+- Claude callback: finds the latest Claude run of the remittance; not `processing` = 409, wrong token = 403, invalid payload = 422 + failed.
+- `Remittance::reviewData()` feeds the review Blade view (flat array); do not query in the view.
+- Retry button is not built yet (a failed remittance means re-upload); Phase 5.
 
 ## Phases and status
 | # | Phase | Status |
@@ -104,8 +115,8 @@ Access scopes (use these, never ad hoc filters):
 | 0 | Foundation: DB prefix, test isolation, migrations on shared DB | done |
 | 1 | Auth (login only), roles, permissions, admin screens for users/roles | done |
 | 2 | Normalized transaction schema | done |
-| 3 | Move both engines from cache to the DB, ownership, policies | **next** |
-| 4 | Admin UI: transactions list/detail, public files screen | pending |
+| 3 | Move both engines from cache to the DB, ownership, policies | done |
+| 4 | Admin UI: transactions list/detail, public files screen | **next** |
 | 5 | Hardening: audit trail, export, sweeper, deploy to a real domain | pending |
 Each phase has a gate; do not start the next until the gate passes.
 
@@ -137,3 +148,4 @@ Fields: payment_reference_number, cr_number, total_amount, total_cwt_amount, dep
 - 2026-10-14: CLAUDE.md created.
 - 2026-10-14: Phase 1 done. Added spatie/laravel-permission, `users.is_active`/`must_change_password` (+ name/is_active indexes), `config/ra.php`, `AccessSeeder`, login/logout/change-password, `EnsureAccountIsUsable` (`account.ok`), admin Users and Roles screens (AJAX, lazy chunks), per-record ownership on all extraction routes, new flat UI shell, tests in `tests/Feature/AccessTest.php`. Extraction routes now require login; callback and signed image route remain public. Migrations (`ra_` tables only) and seeding were run on the shared DB.
 - 2026-10-14: Phase 2 done. Migrations for `remittances`, `remittance_files`, `sales_invoices`, `remittance_invoices`, `extraction_runs` (run on the shared DB, `ra_` tables only), models, enums, factories, `visibleTo` scopes, `tests/Feature/SchemaTest.php`. Removed `files.view-public` from the Account Specialist role (config/ra.php and the DB role) so an AS only ever sees their own files.
+- 2026-10-14: Phase 3 done. Both engines and the review/confirm flow now persist to the database through `RemittanceWriter`; `ExtractionStore` (cache) deleted. Per-line review flags moved to `remittance_invoices.low_confidence_fields` (migration run on shared DB, `ra_` table only). Controllers use `Remittance::visibleTo`. Tests: `ClaudeExtractionTest` rewritten, new `GroqExtractionTest`, `AccessTest`/`SchemaTest` updated. Fixed while testing: `confirmed_by/at` mass assignment, money parsing of exponent strings.

@@ -2,7 +2,9 @@
 
 namespace App\Jobs;
 
-use App\Support\ExtractionStore;
+use App\Enums\ExtractionStatus;
+use App\Models\ExtractionRun;
+use App\Support\RemittanceWriter;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -14,20 +16,16 @@ class ExpireClaudeExtraction implements ShouldQueue
 {
     use Dispatchable, Queueable;
 
-    public function __construct(private readonly string $uuid)
+    public function __construct(private readonly int $runId)
     {
     }
 
     public function handle(): void
     {
-        $entry = ExtractionStore::get($this->uuid);
+        $run = ExtractionRun::find($this->runId);
 
-        if ($entry !== null && $entry['status'] === 'processing') {
-            ExtractionStore::update($this->uuid, [
-                'status' => 'failed',
-                'callback_token' => null,
-                'error_message' => 'Processing took too long. Please try again.',
-            ]);
+        if ($run !== null && $run->status === ExtractionStatus::Processing) {
+            RemittanceWriter::fail($run, 'Processing took too long. Please try again.');
         }
     }
 }
