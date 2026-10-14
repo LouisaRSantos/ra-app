@@ -59,20 +59,20 @@ Route::middleware(['auth', AuthenticateSession::class])->group(function () {
             Route::get('/transactions', [TransactionController::class, 'index'])->name('transactions.index');
             Route::get('/transactions/data', [TransactionController::class, 'data'])
                 ->middleware('throttle:120,1')->name('transactions.data');
-            Route::get('/transactions/{uuid}', [TransactionController::class, 'show'])
-                ->whereUuid('uuid')->middleware('throttle:240,1')->name('transactions.show');
-            Route::get('/transactions/{uuid}/status', [TransactionController::class, 'status'])
-                ->whereUuid('uuid')->middleware('throttle:240,1')->name('transactions.status');
+            Route::get('/transactions/{ref}', [TransactionController::class, 'show'])
+                ->where('ref', 'RA-[0-9]{6}-[A-Z0-9]{5}')->middleware('throttle:240,1')->name('transactions.show');
+            Route::get('/transactions/{ref}/status', [TransactionController::class, 'status'])
+                ->where('ref', 'RA-[0-9]{6}-[A-Z0-9]{5}')->middleware('throttle:240,1')->name('transactions.status');
         });
 
         Route::post('/transactions', [TransactionController::class, 'store'])
             ->middleware(['permission:remittances.upload', 'throttle:20,1'])->name('transactions.store');
-        Route::put('/transactions/{uuid}', [TransactionController::class, 'update'])
-            ->whereUuid('uuid')->middleware(['permission:remittances.confirm', 'throttle:60,1'])->name('transactions.update');
-        Route::delete('/transactions/{uuid}', [TransactionController::class, 'destroy'])
-            ->whereUuid('uuid')->middleware(['permission:remittances.delete', 'throttle:30,1'])->name('transactions.destroy');
-        Route::put('/transactions/{uuid}/files/{position}/visibility', [TransactionController::class, 'visibility'])
-            ->whereUuid('uuid')->whereNumber('position')
+        Route::put('/transactions/{ref}', [TransactionController::class, 'update'])
+            ->where('ref', 'RA-[0-9]{6}-[A-Z0-9]{5}')->middleware(['permission:remittances.confirm', 'throttle:60,1'])->name('transactions.update');
+        Route::delete('/transactions/{ref}', [TransactionController::class, 'destroy'])
+            ->where('ref', 'RA-[0-9]{6}-[A-Z0-9]{5}')->middleware(['permission:remittances.delete', 'throttle:30,1'])->name('transactions.destroy');
+        Route::put('/transactions/{ref}/files/{position}/visibility', [TransactionController::class, 'visibility'])
+            ->where('ref', 'RA-[0-9]{6}-[A-Z0-9]{5}')->whereNumber('position')
             ->middleware(['permission:files.set-visibility', 'throttle:60,1'])->name('transactions.visibility');
 
         // ---- Files ----
@@ -80,8 +80,8 @@ Route::middleware(['auth', AuthenticateSession::class])->group(function () {
             ->middleware('permission:files.view-public')->name('files.index');
         Route::get('/files/data', [FileController::class, 'data'])
             ->middleware(['permission:files.view-public', 'throttle:120,1'])->name('files.data');
-        Route::get('/files/{uuid}/{position}', [FileController::class, 'image'])
-            ->whereUuid('uuid')->whereNumber('position')
+        Route::get('/files/{ref}/{position}', [FileController::class, 'image'])
+            ->where('ref', 'RA-[0-9]{6}-[A-Z0-9]{5}')->whereNumber('position')
             ->middleware(['permission:files.view-public|remittances.view-own|remittances.view-all', 'throttle:600,1'])
             ->name('files.image');
 

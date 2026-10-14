@@ -19,7 +19,7 @@ $(document).ajaxError((_e, xhr) => {
  * previous answered), gentle backoff, paused while the tab is hidden, stops at a final state.
  * Returns a function that cancels it.
  */
-window.pollStatus = (uuid, onData) => {
+window.pollStatus = (ref, onData) => {
     let delay = 2000;
     let stopped = false;
     let timer;
@@ -31,7 +31,7 @@ window.pollStatus = (uuid, onData) => {
             return;
         }
 
-        $.getJSON(`/transactions/${uuid}/status`)
+        $.getJSON(`/transactions/${ref}/status`)
             .done((data) => {
                 onData(data);
                 if (data.status === 'completed' || data.status === 'failed') return;

@@ -50,6 +50,8 @@ class SchemaTest extends TestCase
         $this->assertSame(ExtractionStatus::Completed, $remittance->status);
         $this->assertTrue($owner->is($remittance->user));
         $this->assertNotEmpty($remittance->uuid);
+        $this->assertMatchesRegularExpression('/^RA-[0-9]{6}-[A-Z0-9]{5}$/', $remittance->reference);
+        $this->assertSame('4', $remittance->uuid[14], 'public ids must be random v4, not time-ordered');
         $this->assertSame($remittance->uuid, $remittance->getRouteKey());
     }
 

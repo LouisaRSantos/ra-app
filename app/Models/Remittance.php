@@ -41,6 +41,35 @@ class Remittance extends Model
         return ['uuid'];
     }
 
+    /** Readable id for people and signed-in URLs, e.g. RA-261014-K7Q4M (prefix, date, 5 unambiguous characters). */
+    public static function newReference(): string
+    {
+        $alphabet = 'ABCDEFGHJKMNPQRSTVWXYZ23456789'; // no 0/O, 1/I/L
+
+        do {
+            $code = '';
+            for ($i = 0; $i < 5; $i++) {
+                $code .= $alphabet[random_int(0, strlen($alphabet) - 1)];
+            }
+            $reference = 'RA-'.now()->format('ymd').'-'.$code;
+        } while (static::where('reference', $reference)->exists());
+
+        return $reference;
+    }
+
+    protected static function booted(): void
+    {
+        static::creating(function (self $remittance) {
+            $remittance->reference ??= static::newReference();
+        });
+    }
+
+    /** Fully random (v4), not Laravel's time-ordered default, so the public id reveals nothing about when it was made. */
+    public function newUniqueId(): string
+    {
+        return (string) \Illuminate\Support\Str::uuid();
+    }
+
     public function getRouteKeyName(): string
     {
         return 'uuid';

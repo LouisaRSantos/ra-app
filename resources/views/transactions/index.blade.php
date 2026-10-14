@@ -16,7 +16,7 @@
 
     <div class="panel">
         <div class="toolbar">
-            <input class="input" id="f-q" type="search" placeholder="Search SI no., CR no. or reference" aria-label="Search">
+            <input class="input" id="f-q" type="search" placeholder="Search ref, SI no., CR no. or payment reference" aria-label="Search">
             <select class="select" id="f-status" aria-label="Status">
                 <option value="">Any status</option>
                 <option value="processing">Processing</option>
@@ -35,15 +35,38 @@
         <div class="table-wrap">
             <table class="table">
                 <thead>
-                    <tr>
-                        <th>Uploaded</th><th>Document</th><th>Reference</th><th>CR no.</th>
-                        <th>Deposit date</th><th class="num">Total</th><th>Status</th><th></th>
+                    <tr id="head">
+                        <th class="sortable" data-sort="created_at">Uploaded</th>
+                        <th>Document</th>
+                        <th class="sortable" data-sort="payment_reference_number">Reference</th>
+                        <th class="sortable" data-sort="cr_number">CR no.</th>
+                        <th class="sortable" data-sort="deposit_date">Deposit date</th>
+                        <th class="sortable num" data-sort="total_amount">Total</th>
+                        <th class="sortable" data-sort="status">Status</th>
+                        <th></th>
                     </tr>
                 </thead>
-                <tbody id="rows"></tbody>
+                {{-- skeleton is part of the HTML, so the table frame paints before any script runs --}}
+                <tbody id="rows" aria-busy="true">
+                    <tr class="skeleton"><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td></tr>
+                    <tr class="skeleton"><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td></tr>
+                    <tr class="skeleton"><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td></tr>
+                    <tr class="skeleton"><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td></tr>
+                    <tr class="skeleton"><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td></tr>
+                    </tbody>
             </table>
         </div>
-        <div class="more" id="more" hidden><button class="btn btn-sm" id="btn-more" type="button">Load more</button></div>
+        <div class="pager">
+            <span id="pg-info" class="hint"></span>
+            <span class="pager-controls">
+                <label class="hint" for="f-per">Rows</label>
+                <select class="select" id="f-per" aria-label="Rows per page">
+                    <option>15</option><option>25</option><option>50</option>
+                </select>
+                <button class="btn btn-sm" id="pg-prev" type="button" disabled>Previous</button>
+                <button class="btn btn-sm" id="pg-next" type="button" disabled>Next</button>
+            </span>
+        </div>
     </div>
 
     {{-- Upload --}}
@@ -147,10 +170,10 @@
         window.RA = {
             data: @json(route('transactions.data')),
             store: @json(route('transactions.store')),
-            show: @json(route('transactions.show', ['uuid' => '__ID__'])),
-            update: @json(route('transactions.update', ['uuid' => '__ID__'])),
-            destroy: @json(route('transactions.destroy', ['uuid' => '__ID__'])),
-            visibility: @json(route('transactions.visibility', ['uuid' => '__ID__', 'position' => '__POS__'])),
+            show: @json(route('transactions.show', ['ref' => '__ID__'])),
+            update: @json(route('transactions.update', ['ref' => '__ID__'])),
+            destroy: @json(route('transactions.destroy', ['ref' => '__ID__'])),
+            visibility: @json(route('transactions.visibility', ['ref' => '__ID__', 'position' => '__POS__'])),
         };
     </script>
 @endsection

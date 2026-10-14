@@ -1,23 +1,25 @@
-// Transactions: async list with filters + infinite scroll, and one modal for upload / view / edit / delete.
+// Transactions: server-side data table (skeleton first, then data; sort, page size, paging) and
+// one modal for upload / view / edit / delete.
 import { esc, money, fmtDate, fmtDateTime, errorText } from '../lib/ui';
 
 const MAX_FILES = 5;
 const MAX_BYTES = 10 * 1024 * 1024;
 const CACHE_MS = 20000;
+const COLUMNS = 8;
 
 export default function ($) {
     const cfg = window.RA;
     const url = (tpl, id, pos = '') => tpl.replace('__ID__', id).replace('__POS__', pos);
 
     const $rows = $('#rows');
-    const $more = $('#more');
     const dlgUpload = $('#dlg-upload')[0];
     const dlgDetail = $('#dlg-detail')[0];
     const dlgDelete = $('#dlg-delete')[0];
 
-    const list = { page: 1, loading: false, token: 0 };
-    const watchers = {};          // uuid -> stop-polling function (rows still being read)
-    const cache = new Map();      // uuid -> { at, data } so hover/prefetch makes opening instant
+    const list = { page: 1, perPage: 15, sort: 'created_at', dir: 'desc', loading: false, token: 0 };
+    const watchers = {};          // ref -> stop-polling function (rows still being read)
+    const cache = new Map();      // ref -> { at, data }
+    const inflight = new Map();   // ref -> promise, so the same record is never requested twice at once
 
     // ------------------------------------------------------------------ helpers
 
@@ -35,8 +37,8 @@ export default function ($) {
         const extra = r.files > 1 ? ` <span class="hint">+${r.files - 1} more</span>` : '';
         const owner = r.owner ? `<div class="hint">${esc(r.owner)}</div>` : '';
 
-        return `<tr data-uuid="${esc(r.uuid)}" data-owner="${esc(r.owner || '')}">
-            <td>${esc(fmtDateTime(r.created_at))}</td>
+        return `<tr data-ref="${esc(r.ref)}" data-owner="${esc(r.owner || '')}">
+            <td>${esc(fmtDateTime(r.created_at))}<div class="hint ref">${esc(r.ref)}</div></td>
             <td>${esc(r.document || 'Document')}${extra}${owner}</td>
             <td>${esc(r.payment_reference_number || '')}</td>
             <td>${esc(r.cr_number || '')}</td>
@@ -50,10 +52,9 @@ export default function ($) {
         </tr>`;
     }
 
-    /** The list row shape from a full detail payload (after an edit or when a run finishes). */
     function rowFromDetail(d) {
         return {
-            uuid: d.uuid,
+            ref: d.ref,
             status: d.status,
             confirmed: !!d.confirmed_at,
             document: d.files[0]?.name,
@@ -62,42 +63,49 @@ export default function ($) {
             cr_number: d.fields.cr_number,
             deposit_date: d.fields.deposit_date,
             total_amount: d.fields.total_amount,
-            owner: $rows.find(`tr[data-uuid="${d.uuid}"]`).attr('data-owner') || null,
+            owner: $rows.find(`tr[data-ref="${d.ref}"]`).attr('data-owner') || null,
             created_at: d.uploaded_at,
         };
     }
 
     function replaceRow(r) {
-        const $old = $rows.find(`tr[data-uuid="${r.uuid}"]`);
+        const $old = $rows.find(`tr[data-ref="${r.ref}"]`);
         if ($old.length) $old.replaceWith(rowHtml(r));
-        if (inFlight(r.status)) watch(r.uuid);
+        if (inFlight(r.status)) watch(r.ref);
     }
 
     // Rows still being read update themselves, one sequential poll each.
-    function watch(uuid) {
-        if (watchers[uuid]) return;
+    function watch(ref) {
+        if (watchers[ref]) return;
 
-        watchers[uuid] = window.pollStatus(uuid, (s) => {
-            $rows.find(`tr[data-uuid="${uuid}"] .js-status`).html(badge(s.status, false));
+        watchers[ref] = window.pollStatus(ref, (s) => {
+            $rows.find(`tr[data-ref="${ref}"] .js-status`).html(badge(s.status, false));
             if (!inFlight(s.status)) {
-                delete watchers[uuid];
-                cache.delete(uuid);
-                fetchDetail(uuid).then((d) => replaceRow(rowFromDetail(d)));
+                delete watchers[ref];
+                cache.delete(ref);
+                fetchDetail(ref).then((d) => replaceRow(rowFromDetail(d)));
             }
         });
     }
 
-    function fetchDetail(uuid, force = false) {
-        const hit = cache.get(uuid);
+    function fetchDetail(ref, force = false) {
+        const hit = cache.get(ref);
         if (!force && hit && Date.now() - hit.at < CACHE_MS) return $.Deferred().resolve(hit.data).promise();
+        if (inflight.has(ref)) return inflight.get(ref);
 
-        return $.getJSON(url(cfg.show, uuid)).then((data) => {
-            cache.set(uuid, { at: Date.now(), data });
+        const req = $.getJSON(url(cfg.show, ref)).then((data) => {
+            cache.set(ref, { at: Date.now(), data });
             return data;
         });
+        inflight.set(ref, req);
+        req.always(() => inflight.delete(ref));
+
+        return req;
     }
 
-    // ------------------------------------------------------------------ list
+    // ------------------------------------------------------------------ data table
+
+    const skeletonRows = (n) => ('<tr class="skeleton">' + '<td><span></span></td>'.repeat(COLUMNS) + '</tr>').repeat(n);
 
     function filters() {
         return {
@@ -109,58 +117,88 @@ export default function ($) {
         };
     }
 
-    function load(reset) {
-        if (list.loading && !reset) return;
-        list.loading = true;
+    function syncHeader() {
+        $('#head th.sortable').removeClass('sort-asc sort-desc')
+            .filter(`[data-sort="${list.sort}"]`).addClass(`sort-${list.dir}`);
+    }
+
+    function stopWatchers() {
+        Object.values(watchers).forEach((stop) => stop());
+        Object.keys(watchers).forEach((k) => delete watchers[k]);
+    }
+
+    /** Loads one page: skeleton rows straight away, data when the server answers. */
+    function load(page = 1) {
         const token = ++list.token;
+        list.loading = true;
+        list.page = page;
 
-        if (reset) {
-            list.page = 1;
-            Object.values(watchers).forEach((stop) => stop());
-            Object.keys(watchers).forEach((k) => delete watchers[k]);
-            $rows.html(('<tr class="skeleton">' + '<td><span></span></td>'.repeat(8) + '</tr>').repeat(4));
-            $more.prop('hidden', true);
-        }
+        stopWatchers();
+        $rows.attr('aria-busy', 'true').html(skeletonRows(Math.min(list.perPage, 6)));
+        $('#pg-prev, #pg-next').prop('disabled', true);
+        $('#pg-info').text('Loading…');
 
-        $.getJSON(cfg.data, { ...filters(), page: list.page }).done((res) => {
-            if (token !== list.token) return; // a newer filter change superseded this response
+        $.getJSON(cfg.data, {
+            ...filters(), sort: list.sort, dir: list.dir, per_page: list.perPage, page,
+        }).done((res) => {
+            if (token !== list.token) return; // a newer request superseded this one
 
-            if (reset) $rows.empty();
+            // deleting the last row of the last page leaves it empty: step back
+            if (!res.data.length && page > 1) return load(page - 1);
+
+            $rows.empty();
             res.data.forEach((r) => {
                 $rows.append(rowHtml(r));
-                if (inFlight(r.status)) watch(r.uuid);
+                if (inFlight(r.status)) watch(r.ref);
             });
 
-            if (!$rows.children().length) {
-                $rows.html('<tr><td colspan="8" class="empty">No transactions found.</td></tr>');
+            if (!res.data.length) {
+                $rows.html(`<tr><td colspan="${COLUMNS}" class="empty">No transactions found.</td></tr>`);
+                $('#pg-info').text('');
+            } else {
+                const from = (res.page - 1) * res.per_page + 1;
+                $('#pg-info').text(`Showing ${from}–${from + res.data.length - 1}`);
             }
-            $more.prop('hidden', !res.has_more);
-            list.page += 1;
+
+            $('#pg-prev').prop('disabled', res.page <= 1);
+            $('#pg-next').prop('disabled', !res.has_more);
         }).fail((xhr) => {
             if (token !== list.token) return;
-            $rows.html(`<tr><td colspan="8" class="empty">${esc(errorText(xhr, 'Could not load transactions.'))}</td></tr>`);
+            $rows.html(`<tr><td colspan="${COLUMNS}" class="empty">${esc(errorText(xhr, 'Could not load transactions.'))}</td></tr>`);
+            $('#pg-info').text('');
         }).always(() => {
-            if (token === list.token) list.loading = false;
+            if (token === list.token) {
+                list.loading = false;
+                $rows.attr('aria-busy', 'false');
+            }
         });
     }
 
-    if ('IntersectionObserver' in window) {
-        new IntersectionObserver((entries) => {
-            if (entries[0].isIntersecting && !$more.prop('hidden')) load(false);
-        }, { rootMargin: '240px' }).observe($more[0]);
-    }
-    $('#btn-more').on('click', () => load(false));
+    $('#head').on('click', 'th.sortable', function () {
+        const key = $(this).data('sort');
+        list.dir = list.sort === key ? (list.dir === 'asc' ? 'desc' : 'asc') : (key === 'created_at' || key === 'deposit_date' || key === 'total_amount' ? 'desc' : 'asc');
+        list.sort = key;
+        syncHeader();
+        load(1);
+    });
+
+    $('#pg-prev').on('click', () => load(list.page - 1));
+    $('#pg-next').on('click', () => load(list.page + 1));
+    $('#f-per').on('change', function () { list.perPage = Number($(this).val()); load(1); });
 
     let timer;
-    $('#f-q').on('input', () => { clearTimeout(timer); timer = setTimeout(() => load(true), 250); });
-    $('#f-status, #f-from, #f-to, #f-scope').on('change', () => load(true));
+    $('#f-q').on('input', () => { clearTimeout(timer); timer = setTimeout(() => load(1), 300); });
+    $('#f-status, #f-from, #f-to, #f-scope').on('change', () => load(1));
 
-    // Warm the cache while the pointer is over a row, so the modal opens with data already there.
+    // Warm the cache for a row the pointer rests on, but never stack requests: the detail call
+    // is the heaviest one, so prefetch only when nothing else is in flight.
     let hoverTimer;
-    $rows.on('mouseenter', 'tr[data-uuid]', function () {
-        const uuid = $(this).data('uuid');
+    $rows.on('mouseenter', 'tr[data-ref]', function () {
+        const ref = $(this).data('ref');
         clearTimeout(hoverTimer);
-        hoverTimer = setTimeout(() => fetchDetail(uuid), 150);
+        hoverTimer = setTimeout(() => {
+            if (!inflight.size && !list.loading && !cache.has(ref)) fetchDetail(ref);
+        }, 400);
     });
     $rows.on('mouseleave', 'tr', () => clearTimeout(hoverTimer));
 
@@ -195,12 +233,21 @@ export default function ($) {
             .done((res) => {
                 dlgUpload.close();
                 toast('Uploaded. Reading the document…');
-                $rows.find('.empty').closest('tr').remove();
-                $rows.prepend(rowHtml({
-                    uuid: res.uuid, status: 'pending', confirmed: false, document: files[0].name, files: files.length,
-                    created_at: new Date().toISOString(),
-                }));
-                watch(res.uuid);
+
+                const onFirstPageNewest = list.page === 1 && list.sort === 'created_at' && list.dir === 'desc' && !$('#f-q').val();
+                if (onFirstPageNewest) {
+                    $rows.find('.empty').closest('tr').remove();
+                    $rows.prepend(rowHtml({
+                        ref: res.ref, status: 'pending', confirmed: false, document: files[0].name, files: files.length,
+                        created_at: new Date().toISOString(),
+                    }));
+                    watch(res.ref);
+                } else {
+                    list.sort = 'created_at';
+                    list.dir = 'desc';
+                    syncHeader();
+                    load(1);
+                }
             })
             .fail((xhr) => $err.text(errorText(xhr, 'Upload failed.')))
             .always(() => $btn.prop('disabled', false).text('Upload'));
@@ -226,7 +273,7 @@ export default function ($) {
     function setMode(mode) {
         const editing = mode === 'edit';
         $form.toggleClass('is-view', !editing).find('input').prop('readonly', !editing);
-        $('#btn-close, #btn-edit, #btn-delete').prop('hidden', editing || false);
+        $('#btn-close').prop('hidden', editing);
         $('#btn-cancel-edit, #btn-save').prop('hidden', !editing);
         $('#btn-edit').prop('hidden', editing || !current?.can.edit);
         $('#btn-delete').prop('hidden', editing || !current?.can.delete);
@@ -234,7 +281,7 @@ export default function ($) {
 
     function render(d) {
         current = d;
-        $('#d-title').text(d.files[0]?.name || 'Transaction');
+        $('#d-title').text(d.ref + (d.files[0] ? ' · ' + d.files[0].name : ''));
         $('#d-badge').html(badge(d.status, !!d.confirmed_at));
         $form.find('[data-err]').text('');
 
@@ -272,17 +319,17 @@ export default function ($) {
         setMode('view');
     }
 
-    function followUntilDone(uuid) {
+    function followUntilDone(ref) {
         if (stopDetailPoll) stopDetailPoll();
-        stopDetailPoll = window.pollStatus(uuid, (s) => {
+        stopDetailPoll = window.pollStatus(ref, (s) => {
             if (!inFlight(s.status)) {
                 stopDetailPoll = null;
-                fetchDetail(uuid, true).then((d) => { if (current?.uuid === uuid) render(d); replaceRow(rowFromDetail(d)); });
+                fetchDetail(ref, true).then((d) => { if (current?.ref === ref) render(d); replaceRow(rowFromDetail(d)); });
             }
         });
     }
 
-    function open(uuid, startEditing = false) {
+    function open(ref, startEditing = false) {
         current = null;
         $('#d-title').text('Loading…');
         $('#d-badge').empty();
@@ -292,9 +339,9 @@ export default function ($) {
         $('#btn-close').prop('hidden', false);
         if (!dlgDetail.open) dlgDetail.showModal();
 
-        fetchDetail(uuid).done((d) => {
+        fetchDetail(ref).done((d) => {
             render(d);
-            if (inFlight(d.status)) followUntilDone(uuid);
+            if (inFlight(d.status)) followUntilDone(ref);
             if (startEditing && d.can.edit) setMode('edit');
         }).fail((xhr) => {
             $('#d-title').text('Could not open this transaction');
@@ -302,8 +349,8 @@ export default function ($) {
         });
     }
 
-    $rows.on('click', '.js-view', function () { open($(this).closest('tr').data('uuid')); });
-    $rows.on('click', '.js-edit', function () { open($(this).closest('tr').data('uuid'), true); });
+    $rows.on('click', '.js-view', function () { open($(this).closest('tr').data('ref')); });
+    $rows.on('click', '.js-edit', function () { open($(this).closest('tr').data('ref'), true); });
 
     dlgDetail.addEventListener('close', () => {
         if (stopDetailPoll) { stopDetailPoll(); stopDetailPoll = null; }
@@ -321,10 +368,11 @@ export default function ($) {
         const pos = $box.data('pos');
         const makePublic = $box.prop('checked');
 
-        $.ajax({ url: url(cfg.visibility, current.uuid, pos), method: 'PUT', data: { is_public: makePublic ? 1 : 0 } })
+        $.ajax({ url: url(cfg.visibility, current.ref, pos), method: 'PUT', data: { is_public: makePublic ? 1 : 0 } })
             .done(() => {
                 const f = current.files.find((x) => x.position === pos);
                 if (f) f.is_public = makePublic;
+                cache.delete(current.ref);
                 toast(makePublic ? 'Page is now public.' : 'Page is now private.');
             })
             .fail((xhr) => { $box.prop('checked', !makePublic); toast(errorText(xhr), true); })
@@ -351,9 +399,9 @@ export default function ($) {
             }).get(),
         };
 
-        $.ajax({ url: url(cfg.update, current.uuid), method: 'PUT', contentType: 'application/json', data: JSON.stringify(body) })
+        $.ajax({ url: url(cfg.update, current.ref), method: 'PUT', contentType: 'application/json', data: JSON.stringify(body) })
             .done((d) => {
-                cache.set(d.uuid, { at: Date.now(), data: d });
+                cache.set(d.ref, { at: Date.now(), data: d });
                 render(d);
                 replaceRow(rowFromDetail(d));
                 toast('Saved and confirmed.');
@@ -366,21 +414,20 @@ export default function ($) {
     $('#btn-delete').on('click', () => { $('#dlg-delete [data-err]').text(''); dlgDelete.showModal(); });
     $('#btn-delete-yes').on('click', function () {
         const $btn = $(this).prop('disabled', true);
-        const uuid = current.uuid;
+        const ref = current.ref;
 
-        $.ajax({ url: url(cfg.destroy, uuid), method: 'DELETE' })
+        $.ajax({ url: url(cfg.destroy, ref), method: 'DELETE' })
             .done(() => {
-                cache.delete(uuid);
-                if (watchers[uuid]) { watchers[uuid](); delete watchers[uuid]; }
-                $rows.find(`tr[data-uuid="${uuid}"]`).remove();
-                if (!$rows.children().length) $rows.html('<tr><td colspan="8" class="empty">No transactions found.</td></tr>');
+                cache.delete(ref);
                 dlgDelete.close();
                 dlgDetail.close();
                 toast('Transaction deleted.');
+                load(list.page); // pages shift after a delete, so refetch the current one
             })
             .fail((xhr) => $('#dlg-delete [data-err]').text(errorText(xhr)))
             .always(() => $btn.prop('disabled', false));
     });
 
-    load(true);
+    syncHeader();
+    load(1);
 }

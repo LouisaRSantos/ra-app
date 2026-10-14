@@ -28,7 +28,7 @@ class FileController extends Controller
             ->select([
                 'remittance_files.position', 'remittance_files.original_name', 'remittance_files.mime_type',
                 'remittance_files.size', 'remittance_files.created_at',
-                'remittances.uuid', 'users.name as uploader',
+                'remittances.reference', 'users.name as uploader',
             ])
             ->orderByDesc('remittance_files.created_at')->orderByDesc('remittance_files.id')
             ->simplePaginate(24);
@@ -39,17 +39,17 @@ class FileController extends Controller
                 'size' => $f->size,
                 'uploader' => $f->uploader,
                 'uploaded_at' => $f->created_at->toIso8601String(),
-                'url' => route('files.image', ['uuid' => $f->uuid, 'position' => $f->position]),
+                'url' => route('files.image', ['ref' => $f->reference, 'position' => $f->position]),
             ]),
             'has_more' => $files->hasMorePages(),
         ]);
     }
 
-    public function image(string $uuid, int $position): StreamedResponse
+    public function image(string $ref, int $position): StreamedResponse
     {
         $file = RemittanceFile::visibleTo(auth()->user())
             ->join('remittances', 'remittances.id', '=', 'remittance_files.remittance_id')
-            ->where('remittances.uuid', $uuid)
+            ->where('remittances.reference', $ref)
             ->where('remittance_files.position', $position)
             ->select('remittance_files.*')
             ->firstOrFail();

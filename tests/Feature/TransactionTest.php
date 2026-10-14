@@ -37,7 +37,7 @@ class TransactionTest extends TestCase
 
     private function uuids($response): array
     {
-        return collect($response->json('data'))->pluck('uuid')->all();
+        return collect($response->json('data'))->pluck('ref')->all();
     }
 
     // ------------------------------------------------------------------ list scope
@@ -51,15 +51,15 @@ class TransactionTest extends TestCase
         $theirs = $this->remittance($other);
         $adminsOwn = $this->remittance($admin);
 
-        $this->assertSame([$mine->uuid], $this->uuids($this->actingAs($me)->getJson('/transactions/data')));
+        $this->assertSame([$mine->reference], $this->uuids($this->actingAs($me)->getJson('/transactions/data')));
 
         // an admin sees their own by default, everyone only on request
-        $this->assertSame([$adminsOwn->uuid], $this->uuids($this->actingAs($admin)->getJson('/transactions/data')));
+        $this->assertSame([$adminsOwn->reference], $this->uuids($this->actingAs($admin)->getJson('/transactions/data')));
         $all = $this->uuids($this->actingAs($admin)->getJson('/transactions/data?scope=all'));
-        $this->assertEqualsCanonicalizing([$mine->uuid, $theirs->uuid, $adminsOwn->uuid], $all);
+        $this->assertEqualsCanonicalizing([$mine->reference, $theirs->reference, $adminsOwn->reference], $all);
 
         // a specialist asking for "all" still only gets their own
-        $this->assertSame([$mine->uuid], $this->uuids($this->actingAs($me)->getJson('/transactions/data?scope=all')));
+        $this->assertSame([$mine->reference], $this->uuids($this->actingAs($me)->getJson('/transactions/data?scope=all')));
     }
 
     public function test_user_role_cannot_use_transactions_at_all(): void
@@ -68,8 +68,8 @@ class TransactionTest extends TestCase
         $r = $this->remittance($this->user('Account Specialist'));
 
         $this->actingAs($plain)->getJson('/transactions/data')->assertForbidden();
-        $this->actingAs($plain)->getJson("/transactions/{$r->uuid}")->assertForbidden();
-        $this->actingAs($plain)->deleteJson("/transactions/{$r->uuid}")->assertForbidden();
+        $this->actingAs($plain)->getJson("/transactions/{$r->reference}")->assertForbidden();
+        $this->actingAs($plain)->deleteJson("/transactions/{$r->reference}")->assertForbidden();
     }
 
     public function test_list_search_and_filters(): void
@@ -81,16 +81,41 @@ class TransactionTest extends TestCase
 
         $get = fn (string $qs) => $this->uuids($this->actingAs($me)->getJson('/transactions/data?'.$qs));
 
-        $this->assertSame([$a->uuid], $get('q=REF-A'));
-        $this->assertSame([$b->uuid], $get('q=222'));
-        $this->assertSame([$a->uuid], $get('q=madbsi00000099'));   // SI prefix, case-insensitive
-        $this->assertSame([$b->uuid], $get('status=failed'));
+        $this->assertSame([$a->reference], $get('q=REF-A'));
+        $this->assertSame([$b->reference], $get('q=222'));
+        $this->assertSame([$a->reference], $get('q=madbsi00000099'));   // SI prefix, case-insensitive
+        $this->assertSame([$b->reference], $get('status=failed'));
         $this->assertEmpty($get('from=2999-01-01'));
         $this->assertCount(2, $get('to=2999-01-01'));
         $this->assertEmpty($get('q=%25'));                         // LIKE wildcards are literal
         $this->actingAs($me)->getJson('/transactions/data?status=bogus')->assertUnprocessable();
     }
 
+    public function test_table_sorting_and_page_size(): void
+    {
+        $me = $this->user('Account Specialist');
+        $low = $this->remittance($me, ['total_amount' => '10.00', 'payment_reference_number' => 'B-2']);
+        $high = $this->remittance($me, ['total_amount' => '900.00', 'payment_reference_number' => 'A-1']);
+
+        $get = fn (string $qs) => $this->uuids($this->actingAs($me)->getJson('/transactions/data?'.$qs));
+
+        $this->assertSame([$high->reference, $low->reference], $get('sort=total_amount&dir=desc'));
+        $this->assertSame([$low->reference, $high->reference], $get('sort=total_amount&dir=asc'));
+        $this->assertSame([$high->reference, $low->reference], $get('sort=payment_reference_number&dir=asc'));
+
+        // only whitelisted columns and sizes are accepted (no SQL through the sort parameter)
+        $this->actingAs($me)->getJson('/transactions/data?sort=password')->assertUnprocessable();
+        $this->actingAs($me)->getJson('/transactions/data?sort=total_amount;drop&dir=asc')->assertUnprocessable();
+        $this->actingAs($me)->getJson('/transactions/data?dir=sideways')->assertUnprocessable();
+        $this->actingAs($me)->getJson('/transactions/data?per_page=100000')->assertUnprocessable();
+
+        Remittance::factory()->count(30)->completed()->for($me)->create();
+        $page = $this->actingAs($me)->getJson('/transactions/data?per_page=25')->assertOk();
+        $this->assertCount(25, $page->json('data'));
+        $this->assertSame(25, $page->json('per_page'));
+        $this->assertSame(1, $page->json('page'));
+        $this->assertTrue($page->json('has_more'));
+    }
     public function test_list_paginates_without_extra_cost(): void
     {
         $me = $this->user('Account Specialist');
@@ -124,11 +149,11 @@ class TransactionTest extends TestCase
         $this->actingAs($me)->getJson('/transactions/data'); // warm the permission cache
 
         $list = $count(fn () => $this->actingAs($me)->getJson('/transactions/data')->assertOk());
-        $detail = $count(fn () => $this->actingAs($me)->getJson("/transactions/{$r->uuid}")->assertOk());
-        $image = $count(fn () => $this->actingAs($me)->get("/files/{$r->uuid}/0"));
+        $detail = $count(fn () => $this->actingAs($me)->getJson("/transactions/{$r->reference}")->assertOk());
+        $image = $count(fn () => $this->actingAs($me)->get("/files/{$r->reference}/0"));
 
         $this->assertLessThanOrEqual(4, $list, "list ran {$list} queries");     // user, roles, page
-        $this->assertLessThanOrEqual(8, $detail, "detail ran {$detail} queries");
+        $this->assertLessThanOrEqual(6, $detail, "detail ran {$detail} queries");   // user, roles, record, pages, lines
         $this->assertLessThanOrEqual(4, $image, "image ran {$image} queries");
     }
 
@@ -142,9 +167,9 @@ class TransactionTest extends TestCase
         RemittanceInvoice::factory()->for($r)->for(SalesInvoice::factory()->create(['si_number' => 'SI-1']))
             ->create(['amount' => '10.50']);
 
-        $this->actingAs($me)->getJson("/transactions/{$r->uuid}")->assertOk()
+        $this->actingAs($me)->getJson("/transactions/{$r->reference}")->assertOk()
             ->assertJsonPath('files.0.name', 'page.jpg')
-            ->assertJsonPath('files.0.url', route('files.image', ['uuid' => $r->uuid, 'position' => 0]))
+            ->assertJsonPath('files.0.url', route('files.image', ['ref' => $r->reference, 'position' => 0]))
             ->assertJsonPath('invoices.0.si_number', 'SI-1')
             ->assertJsonPath('invoices.0.amount', '10.50')
             ->assertJsonPath('can.edit', true)
@@ -161,12 +186,12 @@ class TransactionTest extends TestCase
         RemittanceFile::factory()->for($r)->create(['position' => 0]);
         $body = ['total_amount' => 1, 'deposit_date' => '2026-10-01', 'invoices' => [['si_number' => 'SI1', 'amount' => 1, 'cwt_amount' => 0]]];
 
-        $this->actingAs($other)->getJson("/transactions/{$r->uuid}")->assertNotFound();
-        $this->actingAs($other)->getJson("/transactions/{$r->uuid}/status")->assertNotFound();
-        $this->actingAs($other)->putJson("/transactions/{$r->uuid}", $body)->assertNotFound();
-        $this->actingAs($other)->deleteJson("/transactions/{$r->uuid}")->assertNotFound();
-        $this->actingAs($other)->putJson("/transactions/{$r->uuid}/files/0/visibility", ['is_public' => true])->assertNotFound();
-        $this->actingAs($other)->get("/files/{$r->uuid}/0")->assertNotFound();
+        $this->actingAs($other)->getJson("/transactions/{$r->reference}")->assertNotFound();
+        $this->actingAs($other)->getJson("/transactions/{$r->reference}/status")->assertNotFound();
+        $this->actingAs($other)->putJson("/transactions/{$r->reference}", $body)->assertNotFound();
+        $this->actingAs($other)->deleteJson("/transactions/{$r->reference}")->assertNotFound();
+        $this->actingAs($other)->putJson("/transactions/{$r->reference}/files/0/visibility", ['is_public' => true])->assertNotFound();
+        $this->actingAs($other)->get("/files/{$r->reference}/0")->assertNotFound();
 
         $this->assertNotNull($r->fresh());
         $this->assertFalse($r->files->first()->fresh()->is_public);
@@ -177,7 +202,7 @@ class TransactionTest extends TestCase
         $me = $this->user('Account Specialist');
         $r = $this->remittance($me);
 
-        $this->actingAs($me)->putJson("/transactions/{$r->uuid}", [
+        $this->actingAs($me)->putJson("/transactions/{$r->reference}", [
             'payment_reference_number' => 'REF-1', 'cr_number' => '77', 'total_amount' => '100', 'total_cwt_amount' => '',
             'deposit_date' => '2026-10-02',
             'invoices' => [
@@ -200,10 +225,10 @@ class TransactionTest extends TestCase
         $pending = $this->remittance($me, ['status' => 'processing']);
         $ok = ['total_amount' => 1, 'deposit_date' => '2026-10-01', 'invoices' => [['si_number' => 'SI1']]];
 
-        $this->actingAs($me)->putJson("/transactions/{$r->uuid}", [])->assertUnprocessable();
-        $this->actingAs($me)->putJson("/transactions/{$r->uuid}", [...$ok, 'total_amount' => 'abc'])->assertUnprocessable();
-        $this->actingAs($me)->putJson("/transactions/{$r->uuid}", [...$ok, 'invoices' => []])->assertUnprocessable();
-        $this->actingAs($me)->putJson("/transactions/{$pending->uuid}", $ok)->assertStatus(409);
+        $this->actingAs($me)->putJson("/transactions/{$r->reference}", [])->assertUnprocessable();
+        $this->actingAs($me)->putJson("/transactions/{$r->reference}", [...$ok, 'total_amount' => 'abc'])->assertUnprocessable();
+        $this->actingAs($me)->putJson("/transactions/{$r->reference}", [...$ok, 'invoices' => []])->assertUnprocessable();
+        $this->actingAs($me)->putJson("/transactions/{$pending->reference}", $ok)->assertStatus(409);
     }
 
     public function test_delete_removes_rows_and_files(): void
@@ -214,7 +239,7 @@ class TransactionTest extends TestCase
         Storage::disk('local')->put($file->path, 'bytes');
         RemittanceInvoice::factory()->for($r)->create();
 
-        $this->actingAs($me)->deleteJson("/transactions/{$r->uuid}")->assertOk();
+        $this->actingAs($me)->deleteJson("/transactions/{$r->reference}")->assertOk();
 
         $this->assertNull(Remittance::find($r->id));
         $this->assertSame(0, RemittanceFile::count() + RemittanceInvoice::count());
@@ -256,21 +281,21 @@ class TransactionTest extends TestCase
         Storage::disk('local')->put($shared->path, 's');
 
         $this->actingAs($plain)->getJson('/files/data')->assertOk()->assertJsonCount(0, 'data');
-        $this->actingAs($plain)->get("/files/{$r->uuid}/1")->assertNotFound();
+        $this->actingAs($plain)->get("/files/{$r->reference}/1")->assertNotFound();
 
-        $this->actingAs($owner)->putJson("/transactions/{$r->uuid}/files/1/visibility", ['is_public' => true])->assertOk();
+        $this->actingAs($owner)->putJson("/transactions/{$r->reference}/files/1/visibility", ['is_public' => true])->assertOk();
 
         $list = $this->actingAs($plain)->getJson('/files/data')->assertOk();
         $list->assertJsonCount(1, 'data')->assertJsonPath('data.0.name', 'shared.jpg')->assertJsonPath('data.0.uploader', $owner->name);
         // no extracted data leaks into the public listing
         $this->assertSame(['name', 'size', 'uploader', 'uploaded_at', 'url'], array_keys($list->json('data.0')));
 
-        $this->actingAs($plain)->get("/files/{$r->uuid}/1")->assertOk()->assertHeader('Cache-Control', 'max-age=86400, private');
-        $this->actingAs($plain)->get("/files/{$r->uuid}/0")->assertNotFound();           // the private page stays private
-        $this->actingAs($plain)->getJson("/transactions/{$r->uuid}")->assertForbidden(); // and so does the data
+        $this->actingAs($plain)->get("/files/{$r->reference}/1")->assertOk()->assertHeader('Cache-Control', 'max-age=86400, private');
+        $this->actingAs($plain)->get("/files/{$r->reference}/0")->assertNotFound();           // the private page stays private
+        $this->actingAs($plain)->getJson("/transactions/{$r->reference}")->assertForbidden(); // and so does the data
 
-        $this->actingAs($owner)->putJson("/transactions/{$r->uuid}/files/1/visibility", ['is_public' => false])->assertOk();
-        $this->actingAs($plain)->get("/files/{$r->uuid}/1")->assertNotFound();
+        $this->actingAs($owner)->putJson("/transactions/{$r->reference}/files/1/visibility", ['is_public' => false])->assertOk();
+        $this->actingAs($plain)->get("/files/{$r->reference}/1")->assertNotFound();
     }
 
     public function test_specialist_never_sees_another_specialists_public_file(): void
@@ -281,9 +306,9 @@ class TransactionTest extends TestCase
         $f = RemittanceFile::factory()->public()->for($r)->create(['position' => 0]);
         Storage::disk('local')->put($f->path, 'x');
 
-        $this->actingAs($b)->get("/files/{$r->uuid}/0")->assertNotFound();
+        $this->actingAs($b)->get("/files/{$r->reference}/0")->assertNotFound();
         $this->actingAs($b)->getJson('/files/data')->assertForbidden(); // the shared list is for the User role / admins
-        $this->actingAs($a)->get("/files/{$r->uuid}/0")->assertOk();
+        $this->actingAs($a)->get("/files/{$r->reference}/0")->assertOk();
     }
 
     public function test_visibility_input_is_validated(): void
@@ -292,8 +317,8 @@ class TransactionTest extends TestCase
         $r = $this->remittance($me);
         RemittanceFile::factory()->for($r)->create(['position' => 0]);
 
-        $this->actingAs($me)->putJson("/transactions/{$r->uuid}/files/0/visibility", [])->assertUnprocessable();
-        $this->actingAs($me)->putJson("/transactions/{$r->uuid}/files/5/visibility", ['is_public' => true])->assertNotFound();
+        $this->actingAs($me)->putJson("/transactions/{$r->reference}/files/0/visibility", [])->assertUnprocessable();
+        $this->actingAs($me)->putJson("/transactions/{$r->reference}/files/5/visibility", ['is_public' => true])->assertNotFound();
         $this->actingAs($me)->putJson('/transactions/not-a-uuid/files/0/visibility', ['is_public' => true])->assertNotFound();
     }
 }

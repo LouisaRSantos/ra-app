@@ -31,8 +31,8 @@ class AccessTest extends TestCase
         }
 
         $this->postJson('/admin/users', [])->assertUnauthorized();
-        $this->putJson('/transactions/00000000-0000-0000-0000-000000000000', [])->assertUnauthorized();
-        $this->getJson('/transactions/00000000-0000-0000-0000-000000000000/status')->assertUnauthorized();
+        $this->putJson('/transactions/RA-000000-AAAAA', [])->assertUnauthorized();
+        $this->getJson('/transactions/RA-000000-AAAAA/status')->assertUnauthorized();
     }
 
     public function test_there_is_no_signup(): void
@@ -73,7 +73,7 @@ class AccessTest extends TestCase
         $user = $this->userWithRole('Account Specialist', ['password' => 'Temp-pass-1', 'must_change_password' => true]);
 
         $this->actingAs($user)->get('/transactions')->assertRedirect('/password');
-        $this->actingAs($user)->getJson('/transactions/00000000-0000-0000-0000-000000000000/status')->assertStatus(423);
+        $this->actingAs($user)->getJson('/transactions/RA-000000-AAAAA/status')->assertStatus(423);
 
         $this->actingAs($user)->put('/password', [
             'current_password' => 'Temp-pass-1',
@@ -104,7 +104,7 @@ class AccessTest extends TestCase
 
         $this->actingAs($plain)->get('/transactions')->assertForbidden();
         $this->actingAs($plain)->post('/transactions')->assertForbidden();
-        $this->actingAs($plain)->get('/transactions/00000000-0000-0000-0000-000000000000/status')->assertForbidden();
+        $this->actingAs($plain)->get('/transactions/RA-000000-AAAAA/status')->assertForbidden();
         $this->actingAs($plain)->get('/files')->assertOk();
     }
 
@@ -114,7 +114,7 @@ class AccessTest extends TestCase
         $other = $this->userWithRole('Account Specialist');
         $admin = $this->userWithRole('Admin');
         $remittance = Remittance::factory()->completed()->for($owner)->create();
-        $uuid = $remittance->uuid;
+        $uuid = $remittance->reference;
 
         $this->actingAs($owner)->getJson("/transactions/{$uuid}/status")->assertOk();
         $this->actingAs($other)->getJson("/transactions/{$uuid}/status")->assertNotFound();
@@ -189,14 +189,14 @@ class AccessTest extends TestCase
         $user = $this->userWithRole('Account Specialist');
         $remittance = Remittance::factory()->for($user)->create(['status' => 'processing']);
 
-        $this->actingAs($user)->getJson("/transactions/{$remittance->uuid}/status")->assertOk(); // warm permission cache
+        $this->actingAs($user)->getJson("/transactions/{$remittance->reference}/status")->assertOk(); // warm permission cache
 
         $queries = 0;
         \Illuminate\Support\Facades\DB::listen(function () use (&$queries) {
             $queries++;
         });
 
-        $this->actingAs($user)->getJson("/transactions/{$remittance->uuid}/status")
+        $this->actingAs($user)->getJson("/transactions/{$remittance->reference}/status")
             ->assertOk()->assertJson(['status' => 'processing', 'error_message' => null]);
 
         // user, roles, remittance. Each query is a network round trip against the shared DB.
@@ -209,7 +209,7 @@ class AccessTest extends TestCase
         $remittance = Remittance::factory()->for($user)->create(['status' => 'failed']);
         $remittance->runs()->create(['engine' => 'claude', 'status' => 'failed', 'error' => 'Processing took too long.']);
 
-        $this->actingAs($user)->getJson("/transactions/{$remittance->uuid}/status")
+        $this->actingAs($user)->getJson("/transactions/{$remittance->reference}/status")
             ->assertOk()->assertJson(['status' => 'failed', 'error_message' => 'Processing took too long.']);
     }
 

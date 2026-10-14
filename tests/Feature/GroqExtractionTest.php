@@ -60,9 +60,9 @@ class GroqExtractionTest extends TestCase
         // sync queue in tests: the job runs inside the upload request
         $uuid = $this->actingAs($user)->post(route('transactions.store'), ['engine' => 'groq', 
             'images' => [UploadedFile::fake()->image('voucher.jpg', 800, 600)],
-        ], ['Accept' => 'application/json'])->assertCreated()->json('uuid');
+        ], ['Accept' => 'application/json'])->assertCreated()->json('ref');
 
-        $remittance = Remittance::where('uuid', $uuid)->firstOrFail();
+        $remittance = Remittance::where('reference', $uuid)->firstOrFail();
         $this->assertSame(ExtractionStatus::Completed, $remittance->status);
         $this->assertSame('1500.00', $remittance->total_amount);
         $this->assertSame('2026-10-01', $remittance->deposit_date->toDateString());
@@ -111,7 +111,7 @@ class GroqExtractionTest extends TestCase
 
         $this->assertSame(ExtractionStatus::Failed, $run->fresh()->status);
         $this->assertSame(ExtractionStatus::Failed, $run->remittance->fresh()->status);
-        $this->actingAs($user)->getJson("/transactions/{$run->remittance->uuid}/status")
+        $this->actingAs($user)->getJson("/transactions/{$run->remittance->reference}/status")
             ->assertJson(['status' => 'failed'])->assertJsonPath('error_message', fn ($m) => is_string($m) && $m !== '');
     }
 
@@ -121,7 +121,7 @@ class GroqExtractionTest extends TestCase
         $user = $this->specialist();
         $run = RemittanceWriter::createFromUpload($user, [UploadedFile::fake()->image('a.jpg')], ExtractionEngine::Groq);
 
-        $this->actingAs($user)->putJson("/transactions/{$run->remittance->uuid}", [
+        $this->actingAs($user)->putJson("/transactions/{$run->remittance->reference}", [
             'total_amount' => 1, 'deposit_date' => '2026-10-01',
             'invoices' => [['si_number' => 'SI1', 'amount' => 1, 'cwt_amount' => 0]],
         ])->assertStatus(409);
@@ -158,7 +158,7 @@ class GroqExtractionTest extends TestCase
         $other = $this->specialist();
         $uuid = $this->actingAs($owner)->post(route('transactions.store'), ['engine' => 'groq', 
             'images' => [UploadedFile::fake()->image('a.jpg')],
-        ], ['Accept' => 'application/json'])->json('uuid');
+        ], ['Accept' => 'application/json'])->json('ref');
 
         $this->actingAs($other)->getJson("/transactions/{$uuid}/status")->assertNotFound();
         $this->actingAs($other)->getJson("/transactions/{$uuid}")->assertNotFound();
@@ -167,6 +167,6 @@ class GroqExtractionTest extends TestCase
             'total_amount' => 1, 'deposit_date' => '2026-10-01',
             'invoices' => [['si_number' => 'SI1', 'amount' => 1, 'cwt_amount' => 0]],
         ])->assertNotFound();
-        $this->assertFalse(Remittance::where('uuid', $uuid)->first()->isConfirmed());
+        $this->assertFalse(Remittance::where('reference', $uuid)->first()->isConfirmed());
     }
 }

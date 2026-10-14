@@ -8,8 +8,11 @@ use App\Http\Requests\StoreExtractionRequest;
 use App\Http\Requests\UpdateExtractionRequest;
 use App\Jobs\DispatchClaudeExtraction;
 use App\Jobs\ExtractRemittanceData;
+use App\Models\ExtractionRun;
 use App\Models\Remittance;
 use App\Models\RemittanceFile;
+use App\Models\RemittanceInvoice;
+use App\Models\User;
 use App\Support\RemittanceWriter;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -25,6 +28,16 @@ use Illuminate\Validation\Rule;
  */
 class TransactionController extends Controller
 {
+    /** Sort keys the table may ask for, mapped to indexed (or cheap) columns. */
+    private const SORTABLE = [
+        'created_at' => 'created_at',
+        'payment_reference_number' => 'payment_reference_number',
+        'cr_number' => 'cr_number',
+        'deposit_date' => 'deposit_date',
+        'total_amount' => 'total_amount',
+        'status' => 'status',
+    ];
+
     public function index()
     {
         return view('transactions.index', [
@@ -44,6 +57,9 @@ class TransactionController extends Controller
             'scope' => ['nullable', Rule::in(['mine', 'all'])],
             'from' => ['nullable', 'date_format:Y-m-d'],
             'to' => ['nullable', 'date_format:Y-m-d'],
+            'sort' => ['nullable', Rule::in(array_keys(self::SORTABLE))],
+            'dir' => ['nullable', Rule::in(['asc', 'desc'])],
+            'per_page' => ['nullable', Rule::in(['15', '25', '50'])],
         ]);
 
         // "mine" is the default for everyone; "all" only means something with remittances.view-all.
@@ -53,7 +69,7 @@ class TransactionController extends Controller
         $term = isset($filters['q']) ? addcslashes(trim($filters['q']), '%_\\') : '';
 
         $rows = $query
-            ->select(['id', 'uuid', 'user_id', 'status', 'payment_reference_number', 'cr_number', 'deposit_date', 'total_amount', 'confirmed_at', 'created_at'])
+            ->select(['id', 'uuid', 'reference', 'user_id', 'status', 'payment_reference_number', 'cr_number', 'deposit_date', 'total_amount', 'confirmed_at', 'created_at'])
             ->addSelect(['first_file' => RemittanceFile::select('original_name')
                 ->whereColumn('remittance_id', 'remittances.id')->orderBy('position')->limit(1)])
             ->withCount(['lines', 'files'])
@@ -66,15 +82,17 @@ class TransactionController extends Controller
             ->when($filters['to'] ?? null, fn ($q, $d) => $q->where('created_at', '<=', $d.' 23:59:59'))
             // prefix matches only, so the reference / CR / SI indexes are usable
             ->when($term !== '', fn ($q) => $q->where(fn ($w) => $w
-                ->where('payment_reference_number', 'like', $term.'%')
+                ->where('reference', 'like', mb_strtoupper($term).'%')
+                ->orWhere('payment_reference_number', 'like', $term.'%')
                 ->orWhere('cr_number', 'like', $term.'%')
                 ->orWhereHas('lines.salesInvoice', fn ($s) => $s->where('si_number', 'like', mb_strtoupper($term).'%'))))
-            ->orderByDesc('created_at')->orderByDesc('id')
-            ->simplePaginate(15);
+            ->orderBy(self::SORTABLE[$filters['sort'] ?? 'created_at'], $filters['dir'] ?? 'desc')
+            ->orderByDesc('id')
+            ->simplePaginate((int) ($filters['per_page'] ?? 15));
 
         return response()->json([
             'data' => $rows->getCollection()->map(fn (Remittance $r) => [
-                'uuid' => $r->uuid,
+                'ref' => $r->reference,
                 'status' => $r->status->value,
                 'confirmed' => $r->confirmed_at !== null,
                 'document' => $r->first_file,
@@ -88,12 +106,14 @@ class TransactionController extends Controller
                 'created_at' => $r->created_at->toIso8601String(),
             ]),
             'has_more' => $rows->hasMorePages(),
+            'page' => $rows->currentPage(),
+            'per_page' => $rows->perPage(),
         ]);
     }
 
-    public function show(string $uuid): JsonResponse
+    public function show(string $ref): JsonResponse
     {
-        return response()->json($this->payload($this->find($uuid)));
+        return response()->json($this->detail($ref));
     }
 
     public function store(StoreExtractionRequest $request): JsonResponse
@@ -107,24 +127,24 @@ class TransactionController extends Controller
             ExtractionEngine::Groq => ExtractRemittanceData::dispatch($run->id),
         };
 
-        return response()->json(['uuid' => $run->remittance->uuid, 'status' => 'pending'], 201);
+        return response()->json(['ref' => $run->remittance->reference, 'status' => 'pending'], 201);
     }
 
-    public function update(UpdateExtractionRequest $request, string $uuid): JsonResponse
+    public function update(UpdateExtractionRequest $request, string $ref): JsonResponse
     {
-        $remittance = $this->find($uuid);
+        $remittance = $this->find($ref);
 
         // Only a finished extraction can be edited/confirmed.
         abort_unless($remittance->status === ExtractionStatus::Completed, 409);
 
         RemittanceWriter::confirm($remittance, $request->validated(), $request->user());
 
-        return response()->json($this->payload($this->find($uuid)));
+        return response()->json($this->detail($ref));
     }
 
-    public function destroy(string $uuid): JsonResponse
+    public function destroy(string $ref): JsonResponse
     {
-        $remittance = $this->find($uuid, ['files']);
+        $remittance = $this->find($ref, ['files']);
         $paths = $remittance->files->pluck('path')->all();
 
         // Rows go first (children cascade); the files are removed only once that has committed.
@@ -135,9 +155,9 @@ class TransactionController extends Controller
     }
 
     /** Polled while an extraction runs: one narrow query (two when failed). */
-    public function status(string $uuid): JsonResponse
+    public function status(string $ref): JsonResponse
     {
-        $remittance = Remittance::visibleTo(auth()->user())->where('uuid', $uuid)->select(['id', 'status'])->firstOrFail();
+        $remittance = Remittance::visibleTo(auth()->user())->where('reference', $ref)->select(['id', 'status'])->firstOrFail();
 
         $error = null;
         if ($remittance->status === ExtractionStatus::Failed) {
@@ -148,38 +168,65 @@ class TransactionController extends Controller
         return response()->json(['status' => $remittance->status->value, 'error_message' => $error]);
     }
 
-    public function visibility(Request $request, string $uuid, int $position): JsonResponse
+    public function visibility(Request $request, string $ref, int $position): JsonResponse
     {
         $data = $request->validate(['is_public' => ['required', 'boolean']]);
 
-        $file = $this->find($uuid, [])->files()->where('position', $position)->firstOrFail();
+        $file = $this->find($ref, [])->files()->where('position', $position)->firstOrFail();
         $file->update(['is_public' => $data['is_public']]);
 
         return response()->json(['position' => $position, 'is_public' => $file->is_public]);
     }
 
-    private function find(string $uuid, array $with = ['files', 'lines.salesInvoice', 'latestRun', 'user:id,name', 'confirmedBy:id,name']): Remittance
+    private function find(string $ref, array $with = []): Remittance
     {
-        return Remittance::visibleTo(auth()->user())->where('uuid', $uuid)->with($with)->firstOrFail();
+        return Remittance::visibleTo(auth()->user())->where('reference', $ref)->with($with)->firstOrFail();
     }
 
-    /** What the detail modal renders from, including what the caller may do with it. */
-    private function payload(Remittance $r): array
+    /**
+     * Everything the detail modal renders, in three queries: the record (names and latest run come
+     * in as sub-selects), its pages, and its invoice lines joined to the SI numbers.
+     */
+    private function detail(string $ref): array
     {
         $user = auth()->user();
-        $run = $r->latestRun;
+        $latestRun = fn (string $column) => ExtractionRun::select($column)
+            ->whereColumn('remittance_id', 'remittances.id')->latest('id')->limit(1);
+
+        $r = Remittance::visibleTo($user)
+            ->where('reference', $ref)
+            ->addSelect('remittances.*')
+            ->addSelect([
+                'owner_name' => User::select('name')->whereColumn('users.id', 'remittances.user_id')->limit(1),
+                'confirmer_name' => User::select('name')->whereColumn('users.id', 'remittances.confirmed_by')->limit(1),
+                'run_engine' => $latestRun('engine'),
+                'run_duration' => $latestRun('duration_seconds'),
+                'run_error' => $latestRun('error'),
+            ])
+            ->firstOrFail();
+
+        $files = RemittanceFile::where('remittance_id', $r->id)->orderBy('position')
+            ->get(['position', 'original_name', 'is_public']);
+
+        $lines = RemittanceInvoice::query()
+            ->join('sales_invoices', 'sales_invoices.id', '=', 'remittance_invoices.sales_invoice_id')
+            ->where('remittance_invoices.remittance_id', $r->id)
+            ->orderBy('remittance_invoices.id')
+            ->get(['remittance_invoices.amount', 'remittance_invoices.cwt_amount', 'remittance_invoices.low_confidence_fields', 'sales_invoices.si_number']);
+
+        $reviewed = $r->confirmed_at !== null;
 
         return [
-            'uuid' => $r->uuid,
+            'ref' => $r->reference,
             'status' => $r->status->value,
             'error_message' => $r->status === ExtractionStatus::Failed
-                ? ($run?->error ?: 'We couldn\'t process this document. Please try re-uploading a clearer image.')
+                ? ($r->run_error ?: 'We couldn\'t process this document. Please try re-uploading a clearer image.')
                 : null,
-            'uploaded_by' => $r->user?->name,
+            'uploaded_by' => $r->owner_name,
             'uploaded_at' => $r->created_at->toIso8601String(),
-            'engine' => $run?->engine->value,
-            'duration_seconds' => $run?->duration_seconds,
-            'confirmed_by' => $r->confirmedBy?->name,
+            'engine' => $r->run_engine,
+            'duration_seconds' => $r->run_duration !== null ? (int) $r->run_duration : null,
+            'confirmed_by' => $r->confirmer_name,
             'confirmed_at' => $r->confirmed_at?->toIso8601String(),
             'fields' => [
                 'payment_reference_number' => $r->payment_reference_number,
@@ -188,18 +235,18 @@ class TransactionController extends Controller
                 'total_amount' => $r->total_amount,
                 'total_cwt_amount' => $r->total_cwt_amount,
             ],
-            'low_confidence_fields' => $r->confirmed_at ? [] : ($r->low_confidence_fields ?? []),
-            'invoices' => $r->lines->map(fn ($l) => [
-                'si_number' => $l->salesInvoice->si_number,
+            'low_confidence_fields' => $reviewed ? [] : ($r->low_confidence_fields ?? []),
+            'invoices' => $lines->map(fn ($l) => [
+                'si_number' => $l->si_number,
                 'amount' => $l->amount,
                 'cwt_amount' => $l->cwt_amount,
-                'low_confidence_fields' => $r->confirmed_at ? [] : ($l->low_confidence_fields ?? []),
+                'low_confidence_fields' => $reviewed ? [] : ($l->low_confidence_fields ?? []),
             ])->values(),
-            'files' => $r->files->map(fn ($f) => [
+            'files' => $files->map(fn ($f) => [
                 'position' => $f->position,
                 'name' => $f->original_name,
                 'is_public' => $f->is_public,
-                'url' => route('files.image', ['uuid' => $r->uuid, 'position' => $f->position]),
+                'url' => route('files.image', ['ref' => $r->reference, 'position' => $f->position]),
             ])->values(),
             'can' => [
                 'edit' => $user->can('remittances.confirm') && $r->status === ExtractionStatus::Completed,
